@@ -1,0 +1,59 @@
+# === Uncertainty Injection (ISAC/MIMO) 專案 .gitignore ===
+
+# ---- Python 基本快取 ----
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*$py.class
+
+# ---- 虛擬環境（不要被 Git 追蹤）----
+ml311/
+.venv/
+venv/
+env/
+ENV/
+python_env/
+
+# ---- Build/Packaging ----
+build/
+dist/
+*.egg-info/
+
+# ---- 資料/檢核點/模型（可再生或檔案大）----
+Data/
+Data_MIMO/
+checkpoints/
+Trained_Models_ISAC/
+Trained_Models_MIMO/
+eval_plots/
+
+# 常見大型檔案副檔名（模型/權重/中間檔）
+*.npy
+*.npz
+*.mat
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.bin
+
+# ---- 日誌 ----
+*.log
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- IDE/編輯器 ----
+.vscode/
+.idea/
+
+# ---- 作業系統雜項 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 其他快取/暫存 ----
+.cache/
+*.tmp
