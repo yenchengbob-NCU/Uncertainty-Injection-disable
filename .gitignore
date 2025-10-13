@@ -57,3 +57,6 @@ desktop.ini
 # ---- 其他快取/暫存 ----
 .cache/
 *.tmp
+
+# ---- 評估結果：忽略所有 MLP 下的 CDF 圖 ----
+MLP/**/CDF_*.png

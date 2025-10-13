@@ -50,13 +50,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # 1) 載入離線 H_est
-    if args.channels is None:
-        ch_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "Data", f"channelEstimates_test_{SETTING_STRING}.npy")
-    else:
-        ch_path = args.channels
+    base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
+    test_dir = os.path.join(base_dir, "channelEstimates_test")
+    ch_path = args.channels if args.channels else os.path.join(test_dir, f"{SETTING_STRING}.npy")
+
     if not os.path.exists(ch_path):
         raise FileNotFoundError(f"找不到測試通道檔案：{ch_path}")
+    
     H_est_np = np.load(ch_path)                 # (N,M,K) complex
     H_est_t  = np_to_torch_complex(H_est_np)
     N = H_est_t.shape[0]
@@ -102,4 +102,7 @@ if __name__ == "__main__":
     plt.legend()
     plt.title(f"CDF of {q_pct}% Quantile Min-Rate — {SETTING_STRING}")
     plt.tight_layout()
+    out_fig_path = os.path.join(base_dir, f"CDF_q{q_pct:02d}.png")
+    plt.savefig(out_fig_path)
+    print(f"[EVAL] CDF saved to: {out_fig_path}")
     plt.show()

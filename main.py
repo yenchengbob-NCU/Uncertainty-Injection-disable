@@ -43,10 +43,17 @@ if __name__ == "__main__":
                         help="Start index for plotting training curves")
     args = parser.parse_args()
 
+    # ===============================
+    # 建立階層式輸出資料夾
+    # ===============================
+    base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
+    ckpt_dir = os.path.join(base_dir, "ckpt")
+    curve_dir = os.path.join(base_dir, "training_curves")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(curve_dir, exist_ok=True)
+
     # 訓練曲線檔案路徑
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Trained_Models_ISAC")
-    os.makedirs(out_dir, exist_ok=True)
-    curves_path = os.path.join(out_dir, f"training_curves_Min-Rate_{SETTING_STRING}.npy")
+    curves_path = os.path.join(curve_dir, f"training_curves_Min-Rate_{SETTING_STRING}.npy")
 
     # 只繪圖就退出
     if args.plot:
@@ -115,9 +122,14 @@ if __name__ == "__main__":
 
         # 儲存最佳 checkpoint（以驗證目標為準）
         if reg_val > best_regular:
+            # 指定 Regular 模型的輸出路徑
+            regular_net.model_path = os.path.join(ckpt_dir, f"regular_net_{SETTING_STRING}.ckpt")
             regular_net.save_model()
             best_regular = reg_val
+
         if rob_val > best_robust:
+            # 指定 Robust 模型的輸出路徑
+            robust_net.model_path = os.path.join(ckpt_dir, f"robust_net_{SETTING_STRING}.ckpt")
             robust_net.save_model()
             best_robust = rob_val
 

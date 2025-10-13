@@ -75,10 +75,13 @@ def get_beamformers(H_est: np.ndarray) -> np.ndarray:
 # 簡易自測（直接執行本檔時）
 # ------------------------------
 if __name__ == "__main__":
-    print(f'[ISAC {SETTING_STRING}] Generating offline test channels...')
+    print(f'Generating offline test channels...')
     H_est = estimate_channels(generate_real_channels(N_TEST)) # (N, M, K)
     
-    # save files
-    np.save(f'Data/channelEstimates_test_{SETTING_STRING}.npy', H_est)
-    print(f"[ISAC] Saved: Data/channelEstimates_test_{SETTING_STRING}.npy")
+    out_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING, "channelEstimates_test")
+    os.makedirs(out_dir, exist_ok=True)
 
+    # save files
+    out_path = os.path.join(out_dir, f"{SETTING_STRING}.npy")
+    np.save(out_path, H_est)
+    print(f"[ISAC] Saved: {out_path}")
