@@ -1,108 +1,116 @@
 # -*- coding: utf-8 -*-
 import os
-import argparse
 import numpy as np
 import torch
-from settings import *
-from neural_net import Regular_Net, Robust_Net, _normalize_columns
 import matplotlib.pyplot as plt
 
-def np_to_torch_complex(x_np: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(x_np).to(torch.complex64).to(DEVICE)
+from settings import *
+from neural_net import *
+from rician import large_scale_fading
 
-@torch.no_grad()
-def q_min_rate_vector_under_uncertainty(model, H_est_t: torch.Tensor, H_L: torch.Tensor, L: int) -> np.ndarray:
+
+def sum_rate(comm_net, sense_net, ris_net,
+             h_dk, h_rk, G, g_dt,
+             beta_dk_row, beta_rk_row, beta_G):
+    with torch.no_grad():
+        W_C = comm_net(h_dk, h_rk, G, g_dt)   # (B,M,K)
+        W_S = sense_net(h_dk, h_rk, G, g_dt)  # (B,M,1)
+        phi = ris_net(h_dk, h_rk, G, g_dt)    # (B,N)
+
+        sinrs = comm_net.compute_comm_sinrs(
+            h_dk, h_rk, G, phi, W_S, W_C,
+            beta_dk_row, beta_rk_row, beta_G
+        )  # (B,K)
+
+        rates = comm_net.compute_rates(sinrs)            # (B,K)
+        return rates.sum(dim=1).detach().cpu().numpy()   # (B,)
+
+
+def eval_sense_snr(comm_net, sense_net, ris_net,
+                   h_dk, h_rk, G, g_dt,
+                   beta_dt):
     """
-    用 H_est 設計 W，於擾動通道 H_L 上評估，回傳每個 layout 的 q-分位(min-user rate) 向量，shape=(N,)
+    回傳 sensing SNR (B,) 線性尺度
+    新版：不含 RIS sensing，compute_sense_snr(g_dt, W_S, W_C, beta_dt)
     """
-    N = H_est_t.shape[0]
-    # 設計 precoder：B_raw -> B_dir(L2) -> 等功率 W
-    B_raw = model.get_beamformer(H_est_t)          # (N,M,K)
-    B_dir = _normalize_columns(B_raw)              # (N,M,K)
-    W     = apply_power_allocation_torch(B_dir)    # (N,M,K)
+    with torch.no_grad():
+        W_C = comm_net(h_dk, h_rk, G, g_dt)   # (B,M,K)
+        W_S = sense_net(h_dk, h_rk, G, g_dt)  # (B,M,1)
 
-    # 重複 W 到 (L*N, M, K) —— 使用 repeat（不使用 expand）
-    W_L = W.repeat(L, 1, 1)                        # (L*N, M, K)
+        sense_snr = comm_net.compute_sense_snr(g_dt, W_S, W_C, beta_dt)  # (B,)
+        return sense_snr.detach().cpu().numpy()
 
-    # 在擾動通道上計算 SINR → rate → min-user rate
-    sinrs_L = model.compute_comm_sinrs(H_L, W_L)   # (L*N, K)
-    rates_L = model.compute_rates(sinrs_L).view(L, N, K)
-    min_rates_L = torch.min(rates_L, dim=2).values # (L, N)
-
-    # 每個 layout 的 q-分位（沿 L 取分位）
-    q_vec = torch.quantile(min_rates_L, q=OUTAGE_QUANTILE, dim=0)  # (N,)
-    return q_vec.cpu().numpy()
-
-@torch.no_grad()
-def q_min_rate_under_uncertainty(model, H_est_t: torch.Tensor, H_L: torch.Tensor, L: int) -> float:
-    """
-    回傳 q-分位(min-user rate) 的樣本平均（標量），供表格/列印用。
-    """
-    q_vec = q_min_rate_vector_under_uncertainty(model, H_est_t, H_L, L)  # (N,)
-    return float(q_vec.mean())
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ISAC evaluate: Regular vs Robust (q-quantile)")
-    parser.add_argument("--channels", type=str, default=None,
-                        help=f"Path to offline test channel .npy. Default = Data/channelEstimates_test_{SETTING_STRING}.npy")
-    parser.add_argument("--L", type=int, default=None,
-                        help="Number of uncertainty realizations (default = Robust_Net.L)")
-    args = parser.parse_args()
-
-    # 1) 載入離線 H_est
+    # 1) 載入離線 H_est (npz)
     base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
-    test_dir = os.path.join(base_dir, "channelEstimates_test")
-    ch_path = args.channels if args.channels else os.path.join(test_dir, f"{SETTING_STRING}.npy")
+    npz_path = os.path.join(base_dir, "channelEstimates_test.npz")
+    data = np.load(npz_path)
 
-    if not os.path.exists(ch_path):
-        raise FileNotFoundError(f"找不到測試通道檔案：{ch_path}")
-    
-    H_est_np = np.load(ch_path)                 # (N,M,K) complex
-    H_est_t  = np_to_torch_complex(H_est_np)
-    N = H_est_t.shape[0]
-    print(f"[EVAL] Loaded test channels: {ch_path} (N={N}, M={M}, K={K})")
+    h_dk = torch.from_numpy(data["h_dk"]).to(torch.complex64).to(DEVICE)  # (B,M,K)
+    h_rk = torch.from_numpy(data["h_rk"]).to(torch.complex64).to(DEVICE)  # (B,N,K)
+    G    = torch.from_numpy(data["G"]).to(torch.complex64).to(DEVICE)     # (B,N,M)
 
-    # 2) 準備兩個模型（自動嘗試載入各自 checkpoint）
-    reg = Regular_Net().to(DEVICE).eval()
-    rob = Robust_Net().to(DEVICE).eval()
+    # 新版 key: g_dt；若你舊檔還是 h_dt，就 fallback
+    if "g_dt" in data.files:
+        g_dt = torch.from_numpy(data["g_dt"]).to(torch.complex64).to(DEVICE)  # (B,M,1)
+    else:
+        g_dt = torch.from_numpy(data["h_dt"]).to(torch.complex64).to(DEVICE)  # (B,M,1)
 
-    # 3) 產生同一組擾動通道（與估測誤差脫鉤；不考慮角度抖動）
-    L = args.L if args.L is not None else rob.L
-    with torch.no_grad():
-        H_L = rob.inject_uncertainties(H_est_t)       # (L*N, M, K)
+    print("[EVAL] shapes:",
+          "h_dk", tuple(h_dk.shape),
+          "h_rk", tuple(h_rk.shape),
+          "G", tuple(G.shape),
+          "g_dt", tuple(g_dt.shape))
 
-    # 4) 計算兩個模型的 q-分位(min-user rate)（標量）
-    with torch.no_grad():
-        reg_q = q_min_rate_under_uncertainty(reg, H_est_t, H_L, L)
-        rob_q = q_min_rate_under_uncertainty(rob, H_est_t, H_L, L)
+    # 2) 載入 large-scale (power) fading（只在 SINR/SNR 時計入）
+    beta_G, beta_dt, beta_dk_row, beta_rk_row = large_scale_fading()
 
-    # 5) 結果（只報 q=OUTAGE_QUANTILE 的目標）
-    q_pct = int(OUTAGE_QUANTILE * 100)
-    print(f"\n=== Quantile Objective (q = {q_pct}%) ===")
-    print(f"Regular_Net q-min-rate : {reg_q:.4f} bits/s/Hz")
-    print(f"Robust_Net  q-min-rate : {rob_q:.4f} bits/s/Hz")
-    winner = "Robust_Net" if rob_q > reg_q else "Regular_Net"
-    print(f"Winner: {winner}")
+    # 3) 載入模型 checkpoint
+    ckpt_dir = os.path.join(base_dir, "ckpt")
+    comm_ckpt  = os.path.join(ckpt_dir, f"comm_{SETTING_STRING}.ckpt")
+    sense_ckpt = os.path.join(ckpt_dir, f"sense_{SETTING_STRING}.ckpt")
+    ris_ckpt   = os.path.join(ckpt_dir, f"ris_{SETTING_STRING}.ckpt")
 
-    # 6) 畫 CDF：每個 layout 的 q-分位(min-user rate)
-    with torch.no_grad():
-        reg_q_vec = q_min_rate_vector_under_uncertainty(reg, H_est_t, H_L, L)  # (N,)
-        rob_q_vec = q_min_rate_vector_under_uncertainty(rob, H_est_t, H_L, L)  # (N,)
+    reg_Wc  = CommBeamformerNet().to(DEVICE)
+    reg_Ws  = SenseBeamformerNet().to(DEVICE)
+    reg_phi = RISPhaseNet().to(DEVICE)
 
-    xs_reg = np.sort(reg_q_vec)
-    xs_rob = np.sort(rob_q_vec)
-    cdf    = np.arange(1, N + 1) / N
+    reg_Wc.load_state_dict(torch.load(comm_ckpt,  map_location=DEVICE))
+    reg_Ws.load_state_dict(torch.load(sense_ckpt, map_location=DEVICE))
+    reg_phi.load_state_dict(torch.load(ris_ckpt,  map_location=DEVICE))
 
-    plt.figure()
-    plt.plot(xs_reg, cdf, label="Regular_Net")
-    plt.plot(xs_rob, cdf, label="Robust_Net")
-    plt.xlabel(f"{q_pct}% quantile of min-user rate (bits/s/Hz)")
-    plt.ylabel("Empirical CDF")
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.legend()
-    plt.title(f"CDF of {q_pct}% Quantile Min-Rate — {SETTING_STRING}")
-    plt.tight_layout()
-    out_fig_path = os.path.join(base_dir, f"CDF_q{q_pct:02d}.png")
-    plt.savefig(out_fig_path)
-    print(f"[EVAL] CDF saved to: {out_fig_path}")
-    plt.show()
+    reg_Wc.eval(); reg_Ws.eval(); reg_phi.eval()
+
+    print(f"[EVAL] SETTING_STRING = {SETTING_STRING}")
+    print(f"[EVAL] ckpt_dir       = {ckpt_dir}")
+
+    # 4) 計算 sum-rate
+    print("[EVAL] Computing sum rates ...")
+    reg_sum_rates = sum_rate(
+        reg_Wc, reg_Ws, reg_phi,
+        h_dk, h_rk, G, g_dt,
+        beta_dk_row, beta_rk_row, beta_G
+    )
+    reg_mean = float(np.mean(reg_sum_rates))
+    print("[EVAL] mean sum-rate (bps/Hz):", reg_mean)
+
+    # 5) 計算 sensing SNR
+    print("[EVAL] Computing sensing SNR ...")
+    reg_sense_snr = eval_sense_snr(
+        reg_Wc, reg_Ws, reg_phi,
+        h_dk, h_rk, G, g_dt,
+        beta_dt
+    )
+
+    sense_mean_lin = float(np.mean(reg_sense_snr))
+    sense_mean_db = 10.0 * np.log10(max(sense_mean_lin, 1e-12))
+    print("[EVAL] mean sensing SNR (dB):", sense_mean_db)
+
+    viol_mask = reg_sense_snr < SENSING_SNR_THRESHOLD
+    num_viol = int(viol_mask.sum())
+    total = int(reg_sense_snr.size)
+    viol_ratio = 100.0 * num_viol / max(total, 1)
+
+    print(f"[EVAL] sensing SNR < threshold ({SENSING_SNR_THRESHOLD_dB} dB): "
+          f"{viol_ratio:.2f}%  ({num_viol}/{total})")
