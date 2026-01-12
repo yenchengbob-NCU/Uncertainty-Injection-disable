@@ -7,7 +7,7 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 from tqdm import trange
 from settings import *
-from rician import generate_real_channels, _estimate_single_channel, large_scale_fading
+from rician import generate_real_channels, _estimate_single_channel
 from neural_net import *
 
 def plot_training_curves(curves: np.ndarray, start: int = 0):
@@ -49,32 +49,24 @@ def np_to_torch_complex(x_np: np.ndarray) -> torch.Tensor:
 # 單一步驗證（或訓練）前向：回傳 objective 與統計
 # ------------------------------
 def forward_objective(comm_net, sense_net, ris_net,
-                      h_dk, h_rk, G, g_dt,
-                      beta_dk_row, beta_rk_row, beta_G, beta_dt):
-    """
-    4-channel input:
-      h_dk: (B,M,K), h_rk: (B,N,K), G: (B,N,M), g_dt: (B,M,1)
-    beta are power fading, used only in SINR/SNR computations.
-    """
+                      h_dk, h_rk, G, g_dt):
 
-    # 1) 三個網路各自輸出（新版 forward：4 通道）
+    # 1) 三個網路各自輸出
     W_C = comm_net(h_dk, h_rk, G, g_dt)   # (B,M,K)
     W_S = sense_net(h_dk, h_rk, G, g_dt)  # (B,M,1)
     phi = ris_net(h_dk, h_rk, G, g_dt)    # (B,N)
 
-    # 2) 通訊 SINR / 速率（beta 只在這裡乘入）
+    # 2) 通訊 SINR / 速率
     sinrs = comm_net.compute_comm_sinrs(
-        h_dk, h_rk, G, phi, W_S, W_C,
-        beta_dk_row, beta_rk_row, beta_G
+        h_dk, h_rk, G, phi, W_S, W_C
     )  # (B,K)
 
     rates = comm_net.compute_rates(sinrs)     # (B,K)
     sum_rate = rates.sum(dim=1)               # (B,)
     sum_rate_mean = sum_rate.mean()           # scalar
 
-    # 3) 感測 SNR（不含 RIS）beta 只在這裡乘入
-    #    你的新版 compute_sense_snr: (g_dt, W_S, W_C, beta_dt)
-    sense_snr = comm_net.compute_sense_snr(g_dt, W_S, W_C, beta_dt)  # (B,)
+    # 3) 感測 SNR
+    sense_snr = comm_net.compute_sense_snr(g_dt, W_S, W_C)  # (B,)
     snr_violation = torch.clamp(SENSING_SNR_THRESHOLD - sense_snr.real, min=0.0)
     snr_penalty_mean = snr_violation.mean()
 
@@ -155,7 +147,7 @@ if __name__ == "__main__":
         lr=LEARNING_RATE
     )
 
-    beta_G, beta_dt, beta_dk_row, beta_rk_row = large_scale_fading()
+    
 
     # checkpoint 路徑（最佳 val 依據 objective）
     best_val = -np.inf
@@ -190,9 +182,8 @@ if __name__ == "__main__":
             optimizer.zero_grad(set_to_none=True)
             objective, logs = forward_objective(
                 comm_net, sense_net, ris_net,
-                h_dk, h_rk, G, g_dt,
-                beta_dk_row, beta_rk_row, beta_G, beta_dt
-            )
+                h_dk, h_rk, G, g_dt)
+            
             loss = -objective
             loss.backward()
             optimizer.step()
@@ -216,9 +207,8 @@ if __name__ == "__main__":
 
             val_obj, logs = forward_objective(
                 comm_net, sense_net, ris_net,
-                h_dk, h_rk, G, g_dt,
-                beta_dk_row, beta_rk_row, beta_G, beta_dt
-            )
+                h_dk, h_rk, G, g_dt
+                )
             val_obj = float(val_obj.detach().cpu())
             val_sum_rate = float(logs["sum_rate_mean"].cpu())
             val_sense_snr_db = float(logs["sense_snr_mean_db"].cpu())

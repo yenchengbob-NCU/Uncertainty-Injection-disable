@@ -76,58 +76,44 @@ class BaseMLP(nn.Module):
         return z.view(B, *out_shape)
 
     def compute_comm_sinrs(self,
-                        h_dk: torch.Tensor,   # (B,M,K)
-                        h_rk: torch.Tensor,   # (B,N,K)
-                        G: torch.Tensor,      # (B,N,M)
-                        phi: torch.Tensor,    # (B,N)
-                        W_S: torch.Tensor,    # (B,M,1)
-                        W_C: torch.Tensor,    # (B,M,K)
-                        beta_dk_row,          # (1,K)  power
-                        beta_rk_row,          # (1,K)  power
-                        beta_G                # scalar power
-                        ) -> torch.Tensor:    # (B,K)
-        """
-        回傳:SINR (B,K)
-        H_k^H = h_dk^H + h_rk^H Φ G
-        SINR_k = |H_k^H w_k|^2 / (Σ_{i≠k}|H_k^H w_i|^2 + |H_k^H w_ϑ|^2 + σ_k^2)
-        """
-        B, M, K = h_dk.shape
+        h_dk: torch.Tensor,   # (B,M,K)
+        h_rk: torch.Tensor,   # (B,N,K)
+        G: torch.Tensor,      # (B,N,M)
+        phi: torch.Tensor,    # (B,N)
+        W_S: torch.Tensor,    # (B,M,1)
+        W_C: torch.Tensor,    # (B,M,K)
+    ) -> torch.Tensor:        # (B,K)
 
-        # 先建立 Φ，避免未賦值使用
-        phi_mat = torch.diag_embed(phi)          # (B,N,N)
+        # Φ
+        Phi = torch.diag_embed(phi)   # (B,N,N)
 
         # 型別/裝置對齊
         device, dtype = W_C.device, W_C.dtype
         h_dk, h_rk, G, Phi, W_S, W_C = [t.to(device=device, dtype=dtype)
-                                        for t in (h_dk, h_rk, G, phi_mat, W_S, W_C)]
+                                        for t in (h_dk, h_rk, G, Phi, W_S, W_C)]
+        
+        # 等效通道 H_eff^H = h_dk^H + h_rk^H Φ G
+        Hdk_H = torch.conj(h_dk).transpose(1, 2)  # (B,K,M)
+        hrk_H = torch.conj(h_rk).transpose(1, 2)  # (B,K,N)
+        PhG   = torch.matmul(Phi, G)              # (B,N,M)
+        HrPhG = torch.matmul(hrk_H, PhG)          # (B,K,M)
+        H_eff_H = Hdk_H + HrPhG                   # (B,K,M)
 
-        # --- beta(power) 只在 SINR 用：先轉 tensor，再取 sqrt 當振幅縮放 ---
-        beta_dk_t = torch.as_tensor(beta_dk_row, device=device, dtype=torch.float32).view(1, K, 1)  # (1,K,1)
-        beta_rk_t = torch.as_tensor(beta_rk_row, device=device, dtype=torch.float32).view(1, K, 1)  # (1,K,1)
-        beta_G_t  = torch.as_tensor(beta_G,      device=device, dtype=torch.float32)                 # scalar
+        # ====== 正式 SINR 計算 ======
+        # S = H_eff^H W_C -> (B,K,K)
+        S = torch.matmul(H_eff_H, W_C)                 # (B,K,K)
+        P = (S.abs() ** 2)                             # (B,K,K)
 
-        amp_dk = torch.sqrt(beta_dk_t).to(dtype=dtype)                    # (1,K,1)
-        amp_ris = torch.sqrt(beta_rk_t * beta_G_t).to(dtype=dtype)        # (1,K,1)
+        signal = P.diagonal(dim1=1, dim2=2)            # (B,K)
+        interf_comm = P.sum(dim=2) - signal            # (B,K)
 
-        # --- 分開算 direct 與 RIS 路徑，再套用 amp ---
-        Hdk_H = torch.conj(h_dk).transpose(1, 2)                          # (B,K,M)
-        hrk_H = torch.conj(h_rk).transpose(1, 2)                          # (B,K,N)
-        PhG   = torch.matmul(Phi, G)                                      # (B,N,M)
-        Hris_H = torch.matmul(hrk_H, PhG)                                 # (B,K,M)
+        # 感測干擾：T = H_eff^H W_S -> (B,K,1)
+        T = torch.matmul(H_eff_H, W_S).squeeze(-1)     # (B,K)
+        interf_sense = (T.abs() ** 2)                  # (B,K)
 
-        # 有效通道（相干相加）：sqrt(beta_dk)*direct + sqrt(beta_rk*beta_G)*RIS
-        H_eff_H = amp_dk * Hdk_H + amp_ris * Hris_H                       # (B,K,M)
-
-        # --- 你原本的 SINR 計算完全照舊 ---
-        S = torch.matmul(H_eff_H, W_C)                                    # (B,K,K)
-        P = (S.abs())**2                                                  # (B,K,K) real
-
-        signal = torch.diagonal(P, dim1=1, dim2=2)                        # (B,K)
-        interf_comm  = P.sum(dim=2) - signal                              # (B,K)
-        interf_sense = (torch.matmul(H_eff_H, W_S).abs()**2).squeeze(-1)   # (B,K)
-
-        noise = torch.as_tensor(NOISE_POWER, dtype=signal.dtype, device=device)
+        noise = torch.tensor(NOISE_POWER, device=device, dtype=signal.dtype)
         sinr = signal / (interf_comm + interf_sense + noise)
+
         return sinr
 
     # -- 速率（底 2；bits/s/Hz）
@@ -140,22 +126,17 @@ class BaseMLP(nn.Module):
                         g_dt: torch.Tensor,   # (B,M,1) small-scale
                         W_S: torch.Tensor,    # (B,M,1)
                         W_C: torch.Tensor,    # (B,M,K)
-                        beta_dt: float        # scalar power
                         ) -> torch.Tensor:    # (B,)
         # type/device align
         device, dtype = W_C.device, W_C.dtype
         g_dt, W_S, W_C = [t.to(device=device, dtype=dtype) for t in (g_dt, W_S, W_C)]
 
-        # beta(power) only used here: amplitude scaling sqrt(beta_dt)
-        amp_dt = torch.sqrt(torch.tensor(beta_dt, device=device, dtype=torch.float32)).to(dtype=dtype)
+        GtH = g_dt @ torch.conj(g_dt).transpose(1, 2)               # (B,M,M)
 
-        v_t = amp_dt * g_dt                                  # (B,M,1)
-        GtH = v_t @ torch.conj(v_t).transpose(1, 2)          # (B,M,M)
-
-        term_comm  = GtH @ W_C                               # (B,M,K)
-        num_comm   = (term_comm.abs()**2).sum(dim=(1, 2))    # (B,)
-        term_sense = GtH @ W_S                               # (B,M,1)
-        num_sense  = (term_sense.abs()**2).sum(dim=1).squeeze(-1)  # (B,)
+        term_comm  = GtH @ W_C                                      # (B,M,K)
+        num_comm   = (term_comm.abs()**2).sum(dim=(1, 2))           # (B,)
+        term_sense = GtH @ W_S                                      # (B,M,1)
+        num_sense  = (term_sense.abs()**2).sum(dim=1).squeeze(-1)   # (B,)
 
         numer = num_comm + num_sense
         denom = torch.tensor(NOISE_POWER, device=device, dtype=numer.dtype)
@@ -231,3 +212,71 @@ class RISPhaseNet(BaseMLP):
         y = self.forward_mlp(x)                            # (B, out_dim)
         phi = self.decode(y, (RIS_UNIT,))                  # (B,N) complex
         return phi                                         # (B,N)(符合大小)
+    
+if __name__ == "__main__":
+    import numpy as np
+    import torch
+    from rician import generate_real_channels
+
+    # ---------
+    # 1) 用 rician 生成通道（你這版 rician 已把 large-scale 乘進通道本體）
+    # ---------
+    B = 1
+    device = torch.device(DEVICE) if isinstance(DEVICE, str) else DEVICE
+
+    h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(B)  # (B,M,K),(B,N,K),(B,N,M),(B,M,1) :contentReference[oaicite:1]{index=1}
+
+    h_dk = torch.from_numpy(h_dk_np).to(torch.complex64).to(device)
+    h_rk = torch.from_numpy(h_rk_np).to(torch.complex64).to(device)
+    G    = torch.from_numpy(G_np).to(torch.complex64).to(device)
+    g_dt = torch.from_numpy(g_dt_np).to(torch.complex64).to(device)
+
+    M, N, K = TX_ANT, RIS_UNIT, UAV_COMM
+
+    # ---------
+    # 2) 固定 Phi = I  (等價於 phi = ones)
+    # ---------
+    phi = torch.ones((B, N), dtype=torch.complex64, device=device)  # phi_n = 1
+    # Phi = diag(phi) = I
+    # 但因為 Phi=I，你可以直接省略 Phi，直接用 hrk_H @ G
+
+    # ---------
+    # 3) 計算通訊等效通道
+    #    H_eff^H = h_dk^H + h_rk^H Phi G = h_dk^H + h_rk^H G
+    # ---------
+    Hdk_H = torch.conj(h_dk).transpose(1, 2)   # (B,K,M)
+    hrk_H = torch.conj(h_rk).transpose(1, 2)   # (B,K,N)
+
+    HrPhG = torch.matmul(hrk_H, G)            # (B,K,M)  (Phi=I)
+    H_eff_H = Hdk_H + HrPhG                   # (B,K,M)
+
+    # ---------
+    # 4) 計算 sensing 等效矩陣 GtH = v_t v_t^H
+    #    這裡 v_t 先直接用 g_dt（你 rician 產生的 g_dt） :contentReference[oaicite:2]{index=2}
+    # ---------
+    v_t = g_dt                                 # (B,M,1)
+    GtH = v_t @ torch.conj(v_t).transpose(1, 2)  # (B,M,M)
+
+    # ---------
+    # 5) 印出功率統計（batch 0）
+    #    power: mean|.|^2, Fro-norm^2
+    # ---------
+    def pstats(name: str, X: torch.Tensor):
+        x0 = X[0]
+        mean_abs2 = (x0.abs() ** 2).mean().item()
+        fro2 = (x0.abs() ** 2).sum().item()
+        print(f"{name:8s} shape={tuple(x0.shape)} | mean|.|^2={mean_abs2:.6e} | ||.||_F^2={fro2:.6e}")
+
+    print("\n[DEBUG] ===== Equivalent-channel powers (Phi = I, no NN) =====")
+    pstats("Hdk_H",   Hdk_H)
+    pstats("HrPhG",   HrPhG)
+    pstats("H_eff_H", H_eff_H)
+    pstats("GtH",     GtH)
+
+    # （可選）看直達 vs RIS 的量級差（dB）
+    eps = 1e-30
+    direct = (Hdk_H[0].abs()**2).mean().item()
+    ris    = (HrPhG[0].abs()**2).mean().item()
+    print(f"\n[DEBUG] mean|Hdk_H|^2 / mean|HrPhG|^2 = {10*np.log10((direct+eps)/(ris+eps)):.2f} dB")
+
+
