@@ -195,7 +195,7 @@ class CommBeamformerNet(BaseMLP):
     def forward(self, h_dk, h_rk, G, g_dt):
         x = self.encode_inputs(h_dk, h_rk, G, g_dt)  # (B, in_dim)
         y = self.forward_mlp(x)                      # (B, out_dim)
-        W_C = self.decode(y, (TX_ANT, UAV_COMM))               # (B,M,K) complex
+        W_C = self.decode(y, (TX_ANT, UAV_COMM))     # (B,M,K) complex
         return W_C
 
 # ------------------------------

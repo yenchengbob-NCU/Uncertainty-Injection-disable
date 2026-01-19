@@ -50,12 +50,7 @@ if __name__ == "__main__":
     h_dk = torch.from_numpy(data["h_dk"]).to(torch.complex64).to(DEVICE)  # (B,M,K)
     h_rk = torch.from_numpy(data["h_rk"]).to(torch.complex64).to(DEVICE)  # (B,N,K)
     G    = torch.from_numpy(data["G"]).to(torch.complex64).to(DEVICE)     # (B,N,M)
-
-    # 新版 key: g_dt；若你舊檔還是 h_dt，就 fallback
-    if "g_dt" in data.files:
-        g_dt = torch.from_numpy(data["g_dt"]).to(torch.complex64).to(DEVICE)  # (B,M,1)
-    else:
-        g_dt = torch.from_numpy(data["h_dt"]).to(torch.complex64).to(DEVICE)  # (B,M,1)
+    g_dt = torch.from_numpy(data["g_dt"]).to(torch.complex64).to(DEVICE)  # (B,M,1)
 
     print("[EVAL] shapes:",
           "h_dk", tuple(h_dk.shape),

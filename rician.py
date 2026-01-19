@@ -103,7 +103,7 @@ def generate_real_channels(n_networks: int) -> np.ndarray:
         hrk_N = cn01((N, K))
         G_N   = cn01((N, M))
 
-        # Rician combine + pathloss amplitude beta
+        # Rician combine 
         hdk = hdk_N                                       # (M,K)
         hrk = (rho_LoS * aN_RIS_UE + rho_NLoS * hrk_N)    # (N,K)
         Gmm = (rho_LoS * G_LoS     + rho_NLoS * G_N)      # (N,M)
