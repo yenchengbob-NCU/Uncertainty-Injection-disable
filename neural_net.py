@@ -162,17 +162,22 @@ class BaseMLP(nn.Module):
         return numer / denom
 
     # -- 模型存取
-    def load_model(self, tag: str = ""):
+    def load_model(self, tag: str = "", verbose: bool = False):
+        """
+        讀取 checkpoint。
+        - verbose=False: 預設不印出「尚無模型 / 已載入模型」等訊息，避免訓練 log 雜亂
+        - verbose=True : 需要除錯時才開啟
+        """
         if self.model_path and os.path.exists(self.model_path):
             try:
                 self.load_state_dict(torch.load(self.model_path, map_location=DEVICE), strict=True)
-                if tag:
+                if verbose and tag:
                     print(f"[{tag}] 已載入模型：{self.model_path}")
             except Exception as e:
-                if tag:
+                if verbose and tag:
                     print(f"[{tag}] 既有 checkpoint 與網路結構不相容，將從隨機初始化開始。原因：{e}")
         else:
-            if tag:
+            if verbose and tag:
                 print(f"[{tag}] 尚無已訓練模型，從隨機初始化開始。")
 
     def save_model(self):
@@ -231,3 +236,35 @@ class RISPhaseNet(BaseMLP):
         y = self.forward_mlp(x)                            # (B, out_dim)
         phi = self.decode(y, (RIS_UNIT,))                  # (B,N) complex
         return phi                                         # (B,N)(符合大小)
+
+# 魯棒模型
+
+# ------------------------------
+# 4) 通訊 Tx beamformer W_comm ∈ ℂ^{M×K}
+# ------------------------------
+class RobustCommBeamformerNet(CommBeamformerNet):
+    def __init__(self):
+        out_dim = 2 * (TX_ANT * UAV_COMM)
+        BaseMLP.__init__(self, out_dim)  # avoid loading regular ckpt in parent __init__
+        self.model_path = os.path.join(MLP_DIR, "comm_robust.ckpt")
+        self.load_model(tag="Comm-Robust")
+
+# ------------------------------
+# 5) 感測 Tx beamformer W_sense ∈ ℂ^{M×1}
+# ------------------------------
+class RobustSenseBeamformerNet(SenseBeamformerNet):
+    def __init__(self):
+        out_dim = 2 * (TX_ANT)
+        BaseMLP.__init__(self, out_dim)  # avoid loading regular ckpt in parent __init__
+        self.model_path = os.path.join(MLP_DIR, "sens_robust.ckpt")
+        self.load_model(tag="Sens-Robust")
+
+# ------------------------------
+# 6) RIS 反射矩陣 Φ = diag(φ),  φ ∈ ℂ^{N}, |φ_n|=1
+# ------------------------------
+class RobustRISPhaseNet(RISPhaseNet):
+    def __init__(self):
+        out_dim = 2 * (RIS_UNIT)
+        BaseMLP.__init__(self, out_dim)  # avoid loading regular ckpt in parent __init__
+        self.model_path = os.path.join(MLP_DIR, "ris_robust.ckpt")
+        self.load_model(tag="Ris-Robust")

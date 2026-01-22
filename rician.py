@@ -197,8 +197,6 @@ if __name__ == "__main__":
     # 4-channel version: h_dk, h_rk, G, g_dt
     h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(N_TEST)
 
-    beta_dk, beta_G, beta_dk_row, beta_rk_row = large_scale_fading()
-
     h_dk_est = _estimate_single_channel(h_dk_np)
     h_rk_est = _estimate_single_channel(h_rk_np)
     G_est    = _estimate_single_channel(G_np)

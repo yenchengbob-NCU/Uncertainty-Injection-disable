@@ -34,9 +34,9 @@ C0 = 3e8                        # 光速(m/s)
 LAMBDA = C0 / FC                # 波長(m);(8.57 cm)
 BANDWIDTH   = 10e6              # 系統頻寬(Hz)
 NOISE_POWER = 10e-12            # 直接指定雜訊總功率 (單位：W)
-ESTIMATION_PILOT_POWER = 1.0    # 導頻功率(單位：W)
-TRANSMIT_POWER_TOTAL = 2        # 傳輸總功率(單位：W) 論文的33dBm
-SENSING_SNR_THRESHOLD_dB = 14    # 感測 SNR 門檻(dB)
+ESTIMATION_PILOT_POWER = 10e-11 # 導頻功率(單位：W)
+TRANSMIT_POWER_TOTAL = 5        # 傳輸總功率(單位：W) 論文的33dBm
+SENSING_SNR_THRESHOLD_dB = 7    # 感測 SNR 門檻(dB)
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)      # 線性比例 2.5
 
 SENSING_LOSS_WEIGHT    = 500.0     # 罰則係數 λ（越大越重視感測門檻）(0~500)
