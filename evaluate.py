@@ -2,67 +2,50 @@
 import os
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
 
 from settings import *
 from neural_net import *
+from rician import large_scale_fading
 
 
 def sum_rate(comm_net, sense_net, ris_net,
-             h_dk, h_rk, G, g_dt):
-    """
-    Sum-rate (B,) using channels that already include large-scale fading.
-    No beta is applied here.
-    """
+             h_dk, h_rk, G, g_dt,
+             pl_BS_UE, pl_BS_RIS_UE):
     with torch.no_grad():
         W_C = comm_net(h_dk, h_rk, G, g_dt)   # (B,M,K)
         W_S = sense_net(h_dk, h_rk, G, g_dt)  # (B,M,1)
         phi = ris_net(h_dk, h_rk, G, g_dt)    # (B,N)
 
         sinrs = comm_net.compute_comm_sinrs(
-            h_dk, h_rk, G, phi, W_S, W_C
+            h_dk, h_rk, G, phi, W_S, W_C,
+            pl_BS_UE, pl_BS_RIS_UE
         )  # (B,K)
-        
+
         rates = comm_net.compute_rates(sinrs)            # (B,K)
         return rates.sum(dim=1).detach().cpu().numpy()   # (B,)
 
 
-def eval_sense_snr(comm_net, sense_net, ris_net,
-                   h_dk, h_rk, G, g_dt):
+def eval_sense_snr(comm_net, sense_net,
+                   h_dk, h_rk, G, g_dt,
+                   pl_BS_TAR_BS):
     """
-    Return sensing SNR (B,) in linear scale.
-    Assumption: g_dt already includes large-scale fading (your latest convention).
+    回傳 sensing SNR (B,) 線性尺度
+    新版：不含 RIS sensing，compute_sense_snr(g_dt, W_S, W_C, beta_dt)
     """
     with torch.no_grad():
         W_C = comm_net(h_dk, h_rk, G, g_dt)   # (B,M,K)
         W_S = sense_net(h_dk, h_rk, G, g_dt)  # (B,M,1)
 
-        sense_snr = comm_net.compute_sense_snr(g_dt, W_S, W_C)  # (B,)
-
-        if sense_snr is None:
-            raise RuntimeError(
-                "compute_sense_snr() 回傳 None。請確認 neural_net.py 內該函式已完成並 return SNR。"
-            )
-
+        sense_snr = comm_net.compute_sense_snr(g_dt, W_S, W_C, pl_BS_TAR_BS)  # (B,)
         return sense_snr.detach().cpu().numpy()
 
 
 if __name__ == "__main__":
-    # ===============================
     # 1) 載入離線 H_est (npz)
-    # ===============================
     base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
     npz_path = os.path.join(base_dir, "channelEstimates_test.npz")
-
-    if not os.path.exists(npz_path):
-        raise FileNotFoundError(f"[EVAL] 找不到測試通道檔：{npz_path}")
-
     data = np.load(npz_path)
-
-    # 必要 key 檢查
-    required = ["h_dk", "h_rk", "G"]
-    for k in required:
-        if k not in data.files:
-            raise KeyError(f"[EVAL] npz 缺少 key: {k}，目前 keys={data.files}")
 
     h_dk = torch.from_numpy(data["h_dk"]).to(torch.complex64).to(DEVICE)  # (B,M,K)
     h_rk = torch.from_numpy(data["h_rk"]).to(torch.complex64).to(DEVICE)  # (B,N,K)
@@ -75,17 +58,14 @@ if __name__ == "__main__":
           "G", tuple(G.shape),
           "g_dt", tuple(g_dt.shape))
 
-    # ===============================
-    # 2) 載入模型 checkpoint
-    # ===============================
+    # 2) 載入 large-scale (power) fading（只在 SINR/SNR 時計入）
+    pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS = large_scale_fading()
+
+    # 3) 載入模型 checkpoint
     ckpt_dir = os.path.join(base_dir, "ckpt")
     comm_ckpt  = os.path.join(ckpt_dir, f"comm_{SETTING_STRING}.ckpt")
     sense_ckpt = os.path.join(ckpt_dir, f"sense_{SETTING_STRING}.ckpt")
     ris_ckpt   = os.path.join(ckpt_dir, f"ris_{SETTING_STRING}.ckpt")
-
-    for p in [comm_ckpt, sense_ckpt, ris_ckpt]:
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"[EVAL] 找不到 checkpoint：{p}")
 
     reg_Wc  = CommBeamformerNet().to(DEVICE)
     reg_Ws  = SenseBeamformerNet().to(DEVICE)
@@ -100,24 +80,22 @@ if __name__ == "__main__":
     print(f"[EVAL] SETTING_STRING = {SETTING_STRING}")
     print(f"[EVAL] ckpt_dir       = {ckpt_dir}")
 
-    # ===============================
-    # 3) 計算 sum-rate
-    # ===============================
+    # 4) 計算 sum-rate
     print("[EVAL] Computing sum rates ...")
     reg_sum_rates = sum_rate(
         reg_Wc, reg_Ws, reg_phi,
-        h_dk, h_rk, G, g_dt
+        h_dk, h_rk, G, g_dt,
+        pl_BS_UE, pl_BS_RIS_UE
     )
     reg_mean = float(np.mean(reg_sum_rates))
     print("[EVAL] mean sum-rate (bps/Hz):", reg_mean)
 
-    # ===============================
-    # 4) 計算 sensing SNR
-    # ===============================
+    # 5) 計算 sensing SNR
     print("[EVAL] Computing sensing SNR ...")
     reg_sense_snr = eval_sense_snr(
-        reg_Wc, reg_Ws, reg_phi,
-        h_dk, h_rk, G, g_dt
+        reg_Wc, reg_Ws,
+        h_dk, h_rk, G, g_dt,
+        pl_BS_TAR_BS
     )
 
     sense_mean_lin = float(np.mean(reg_sense_snr))

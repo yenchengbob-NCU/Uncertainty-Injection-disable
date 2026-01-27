@@ -183,24 +183,53 @@ def _estimate_single_channel(H: np.ndarray) -> np.ndarray:
 if __name__ == "__main__":
     print("Generating offline test channels...")
     # 創建4條通道
-    h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(N_TEST)
+    h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(5)
 
-    # 估測4條通道
-    h_dk_est = _estimate_single_channel(h_dk_np)
-    h_rk_est = _estimate_single_channel(h_rk_np)
-    G_est    = _estimate_single_channel(G_np)
-    g_dt_est = _estimate_single_channel(g_dt_np)
+    # 創建pathloss
+    pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS = large_scale_fading()
 
-    # save files
-    out_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "channelEstimates_test.npz")
+    # ---- numpy -> torch ----
+    # h_dk: (B,M,K), h_rk: (B,N,K), G: (B,N,M)
+    h_dk = torch.from_numpy(h_dk_np).to(torch.complex64)
+    h_rk = torch.from_numpy(h_rk_np).to(torch.complex64)
+    G    = torch.from_numpy(G_np).to(torch.complex64)
 
-    np.savez(
-        out_path,
-        h_dk=h_dk_est,
-        h_rk=h_rk_est,
-        G=G_est,
-        g_dt=g_dt_est
-    )
-    print(f"[ISAC] Saved: {out_path}")
+    B, M, K = h_dk.shape
+    _, N, _ = h_rk.shape
+
+    # ---- 建 Phi (B,N,N) ----
+    # 這裡用隨機相位當範例；若你有自己的 Phi 請直接替換
+    theta = 2 * np.pi * torch.rand(B, N)
+    Phi = torch.diag_embed(torch.exp(1j * theta)).to(torch.complex64)  # (B,N,N)
+
+    # ---- Pathloss: 功率 -> 振幅 sqrt(power) ----
+    pl_dk_t  = torch.as_tensor(pl_BS_UE,     dtype=torch.float32).view(1, K, 1)      # (1,K,1)
+    pl_ris_t = torch.as_tensor(pl_BS_RIS_UE, dtype=torch.float32).view(1, K, 1)      # (1,K,1)
+
+    amp_dk  = torch.sqrt(pl_dk_t).to(h_dk.dtype)      # complex dtype for clean broadcasting
+    amp_ris = torch.sqrt(pl_ris_t).to(h_dk.dtype)
+
+    # ---- 分開算 direct 與 RIS 路徑 ----
+    Hdk_H  = torch.conj(h_dk).transpose(1, 2)         # (B,K,M)
+    hrk_H  = torch.conj(h_rk).transpose(1, 2)         # (B,K,N)
+    PhG    = torch.matmul(Phi, G)                     # (B,N,M)
+    Hris_H = torch.matmul(hrk_H, PhG)                 # (B,K,M)
+
+    # ---- 有效通道（相干相加）----
+    H_eff_H = amp_dk  * Hdk_H + amp_ris * Hris_H       # (B,K,M)
+
+    eps = 1e-12
+    # ---- (套用 pathloss 振幅後)direct / RIS 的功率 ----
+    Hdk_amp  = amp_dk  * Hdk_H              # (B,K,M)
+    Hris_amp = amp_ris * Hris_H             # (B,K,M)
+
+    P_Hdk_amp  = torch.abs(Hdk_amp)  ** 2
+    P_Hris_amp = torch.abs(Hris_amp) ** 2
+
+    print("Avg Power with pathloss amp (linear):")
+    print("  direct (amp*Hdk) =", P_Hdk_amp.mean().item())
+    print("  RIS    (amp*Hris)=", P_Hris_amp.mean().item())
+
+    print("Avg Power with pathloss amp (dB):")
+    print("  direct (amp*Hdk) =", (10*torch.log10(P_Hdk_amp.mean()  + eps)).item())
+    print("  RIS    (amp*Hris)=", (10*torch.log10(P_Hris_amp.mean() + eps)).item())

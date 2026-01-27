@@ -24,7 +24,7 @@ if torch.cuda.is_available():
 # 場景與天線
 # ================================
 TX_ANT      = 6     #發射天線數(M)
-RX_ANT      = 6     #接收天線數(M) #暫時沒有用到
+RX_ANT      = 6     #接收天線數(M)
 RIS_UNIT    = 40    #反射元件數(N)
 UAV_COMM    = 2     #通訊無人機(K)
 UAV_TAR     = 1     #感測無人機(1)
@@ -35,9 +35,9 @@ LAMBDA = C0 / FC                # 波長(m);(8.57 cm)
 BANDWIDTH   = 10e6              # 系統頻寬(Hz)
 NOISE_POWER = 10e-12            # 直接指定雜訊總功率 (單位：W)
 ESTIMATION_PILOT_POWER = 1.0    # 導頻功率(單位：W)
-TRANSMIT_POWER_TOTAL = 2        # 傳輸總功率(單位：W) 論文的33dBm
-SENSING_SNR_THRESHOLD_dB = 14    # 感測 SNR 門檻(dB)
-SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)
+TRANSMIT_POWER_TOTAL = 1        # 傳輸總功率(單位：W) 論文的33dBm
+SENSING_SNR_THRESHOLD_dB = 30    # 感測 SNR 門檻(dB)
+SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)      # 線性比例 2.5
 
 SENSING_LOSS_WEIGHT    = 500.0     # 罰則係數 λ（越大越重視感測門檻）(0~500)
 RE_POWER_LOSS_WEIGHT   = 5000.0     # 罰則係數 λ（越大越重視感測門檻）(0~500)
