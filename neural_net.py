@@ -6,7 +6,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 from settings import *  
 
+def build_ckpt_path(kind: str, robust: bool = False) -> str:
+    """
+    Align checkpoint path with main training script.
 
+    kind: "comm" | "sense" | "ris"
+    robust: whether to use robust ckpt naming
+    """
+    base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
+    ckpt_dir = os.path.join(base_dir, "ckpt")
+    fname = f"{kind}_{'robust_' if robust else ''}{SETTING_STRING}.ckpt"
+    return os.path.join(ckpt_dir, fname)
+
+VERBOSE_LOAD = True # DEBUG log 開關
 # ------------------------------
 # 基底網路
 # ------------------------------
@@ -145,7 +157,7 @@ class BaseMLP(nn.Module):
         # 等效通道 v_t
         v_t = g_dt @ torch.conj(g_dt).transpose(1, 2)                           # (B,M,M) 
 
-        # Matchfiliter
+        # Matchfiliter !!要修改!!
         eps = 1e-12
         u = g_dt / torch.linalg.norm(g_dt, dim=1, keepdim=True).clamp_min(eps)  # (B,M,1)
         uH = u.conj().transpose(1, 2)                                           # (B,1,M)
@@ -167,17 +179,22 @@ class BaseMLP(nn.Module):
         return numer / denom                                                    # (B,)
 
     # -- 模型存取
-    def load_model(self, tag: str = ""):
+    def load_model(self, tag: str = "", verbose: bool = False):
+        """
+        讀取 checkpoint。
+        - verbose=False: 預設不印出「尚無模型 / 已載入模型」等訊息，避免訓練 log 雜亂
+        - verbose=True : 需要除錯時才開啟
+        """
         if self.model_path and os.path.exists(self.model_path):
             try:
                 self.load_state_dict(torch.load(self.model_path, map_location=DEVICE), strict=True)
-                if tag:
+                if verbose and tag:
                     print(f"[{tag}] 已載入模型：{self.model_path}")
             except Exception as e:
-                if tag:
+                if verbose and tag:
                     print(f"[{tag}] 既有 checkpoint 與網路結構不相容，將從隨機初始化開始。原因：{e}")
         else:
-            if tag:
+            if verbose and tag:
                 print(f"[{tag}] 尚無已訓練模型，從隨機初始化開始。")
 
     def save_model(self):
@@ -193,9 +210,8 @@ class CommBeamformerNet(BaseMLP):
     def __init__(self):
         out_dim = 2 * (TX_ANT*UAV_COMM)
         super().__init__(out_dim)
-        self.model_path = os.path.join(MLP_DIR, "comm.ckpt")
-        # 如果有舊模型就嘗試載入，沒有就會印出「從隨機初始化開始」
-        self.load_model(tag="Comm")
+        self.model_path = build_ckpt_path("comm", robust=False)
+        self.load_model(tag="Comm", verbose=VERBOSE_LOAD)
         
     def forward(self, h_dk, h_rk, G, g_dt):
         x = self.encode_inputs(h_dk, h_rk, G, g_dt)             # (B, in_dim)
@@ -206,13 +222,13 @@ class CommBeamformerNet(BaseMLP):
 # ------------------------------
 # 2) 感測 Tx beamformer W_sense ∈ ℂ^{M×1}
 # ------------------------------
+
 class SenseBeamformerNet(BaseMLP):
     def __init__(self):
         out_dim = 2 * (TX_ANT)
         super().__init__(out_dim)
-        self.model_path = os.path.join(MLP_DIR, "sens.ckpt")
-        # 如果有舊模型就嘗試載入，沒有就會印出「從隨機初始化開始」
-        self.load_model(tag="Sens")
+        self.model_path = build_ckpt_path("sense", robust=False)
+        self.load_model(tag="Sens", verbose=VERBOSE_LOAD)
 
     def forward(self, h_dk, h_rk, G, g_dt):
         x = self.encode_inputs(h_dk, h_rk, G, g_dt)  # (B, in_dim)
@@ -227,12 +243,43 @@ class RISPhaseNet(BaseMLP):
     def __init__(self):
         out_dim = 2 * (RIS_UNIT)
         super().__init__(out_dim)
-        self.model_path = os.path.join(MLP_DIR, "ris.ckpt")
-        # 如果有舊模型就嘗試載入，沒有就會印出「從隨機初始化開始」
-        self.load_model(tag="Ris")
+        self.model_path = build_ckpt_path("ris", robust=False)
+        self.load_model(tag="Ris", verbose=VERBOSE_LOAD)
 
     def forward(self, h_dk, h_rk, G, g_dt):
         x = self.encode_inputs(h_dk, h_rk, G, g_dt)  # (B, in_dim)
         y = self.forward_mlp(x)                            # (B, out_dim)
         phi = self.decode(y, (RIS_UNIT,))                  # (B,N) complex
         return phi                                         # (B,N)(符合大小)
+
+# 魯棒模型
+
+# ------------------------------
+# 4) 通訊 Tx beamformer W_comm ∈ ℂ^{M×K}
+# ------------------------------
+class RobustCommBeamformerNet(CommBeamformerNet):
+    def __init__(self):
+        out_dim = 2 * (TX_ANT * UAV_COMM)
+        BaseMLP.__init__(self, out_dim)  # avoid loading regular ckpt in parent __init__
+        self.model_path = build_ckpt_path("comm", robust=True)
+        self.load_model(tag="Comm-Robust", verbose=VERBOSE_LOAD)
+
+# ------------------------------
+# 5) 感測 Tx beamformer W_sense ∈ ℂ^{M×1}
+# ------------------------------
+class RobustSenseBeamformerNet(SenseBeamformerNet):
+    def __init__(self):
+        out_dim = 2 * (TX_ANT)
+        BaseMLP.__init__(self, out_dim)  # avoid loading regular ckpt in parent __init__
+        self.model_path = build_ckpt_path("sense", robust=True)
+        self.load_model(tag="Sens-Robust", verbose=VERBOSE_LOAD)
+
+# ------------------------------
+# 6) RIS 反射矩陣 Φ = diag(φ),  φ ∈ ℂ^{N}, |φ_n|=1
+# ------------------------------
+class RobustRISPhaseNet(RISPhaseNet):
+    def __init__(self):
+        out_dim = 2 * (RIS_UNIT)
+        BaseMLP.__init__(self, out_dim)  # avoid loading regular ckpt in parent __init__
+        self.model_path = build_ckpt_path("ris", robust=True)
+        self.load_model(tag="Ris-Robust", verbose=VERBOSE_LOAD)
