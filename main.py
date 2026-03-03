@@ -246,13 +246,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # ===============================
-    # 輸出資料夾
+    # --plot 畫出收斂圖
     # ===============================
-    base_dir  = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
-    ckpt_dir  = os.path.join(base_dir, "ckpt")
-    curve_dir = os.path.join(base_dir, "training_curves")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    os.makedirs(curve_dir, exist_ok=True)
+
+    ckpt_dir  = CKPT_DIR
+    curve_dir = CURVE_DIR
 
     # 曲線檔案
     curves_path = os.path.join(curve_dir, f"training_curves_{SETTING_STRING}.npy")
@@ -307,7 +305,7 @@ if __name__ == "__main__":
     robust_ris_ckpt_path    = os.path.join(ckpt_dir, f"ris_robust_{SETTING_STRING}.ckpt")
 
     # ===============================
-    # training curves（分開存檔，避免混在一起）
+    # training curves
     # 每 epoch 追加一行 [train_obj, val_obj, val_sum_rate, val_sense_snr_dB]
     # ===============================
     regular_curves_path = os.path.join(curve_dir, f"training_curves_regular_{SETTING_STRING}.npy")
@@ -325,6 +323,7 @@ if __name__ == "__main__":
         regular_comm_net.train(); regular_sense_net.train(); regular_ris_net.train()
         robust_comm_net.train();  robust_sense_net.train();  robust_ris_net.train()
 
+        #每次清空
         reg_obj_ep = 0.0
         rob_obj_ep = 0.0
 
@@ -349,7 +348,7 @@ if __name__ == "__main__":
                 h_dk, h_rk, G, g_dt,
                 pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS
             )
-            (-reg_objective).backward()
+            (-reg_objective).backward()                                 # 訓練目標
             regular_optimizer.step()
             reg_obj_ep += reg_objective.item() / MINIBATCHES
 
@@ -360,7 +359,7 @@ if __name__ == "__main__":
                 h_dk, h_rk, G, g_dt,
                 pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS
             )
-            (-rob_objective).backward()
+            (-rob_objective).backward()                                 # 訓練目標
             robust_optimizer.step()
             rob_obj_ep += rob_objective.item() / MINIBATCHES
 

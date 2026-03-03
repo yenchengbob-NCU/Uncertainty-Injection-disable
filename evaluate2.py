@@ -54,6 +54,7 @@ def eval_metrics_mean_sumrate_var_snr(
 
     回傳 (per-sample):
       sumrate_mean:  (B,)  = mean over injections
+      sumrate_min:   (B,)  = min  over injections (worst case among L samples)
       snr_var:       (B,)  = VaR_q(SNR)  (kth smallest)
       snr_penalty:   (B,)  = max(thr - snr_var, 0)
       obj_out:       (B,)  = sumrate_mean - λsnr*snr_penalty - λphi*phi_penalty - λp*tx_excess
@@ -133,9 +134,10 @@ def eval_metrics_mean_sumrate_var_snr(
 
     # ----------------------------
     # (C) Metrics per sample (B,)
-    #     mean SumRate, and VaR_q(SNR)
+    #     mean SumRate, min SumRate, and VaR_q(SNR)
     # ----------------------------
     sumrate_mean = sumrate_samples.mean(dim=1)             # (B,)  E[SumRate] approx
+    sumrate_min  = sumrate_samples.min(dim=1).values       # (B,)  min SumRate among injections
 
     k = max(1, int(math.ceil(q * L)))                      # L=2000,q=0.05 -> k=100
     snr_var, _ = torch.kthvalue(snr_samples, k=k, dim=1)   # (B,)  VaR_q(SNR)
@@ -151,7 +153,7 @@ def eval_metrics_mean_sumrate_var_snr(
         - TX_POWER_LOSS_WEIGHT * tx_excess
     )  # (B,)
 
-    return sumrate_mean, snr_var, snr_penalty, obj_out, phi_penalty, tx_excess
+    return sumrate_mean, sumrate_min, snr_var, snr_penalty, obj_out, phi_penalty, tx_excess
 
 
 # ============================================================
@@ -160,16 +162,22 @@ def eval_metrics_mean_sumrate_var_snr(
 if __name__ == "__main__":
 
     # ----------------------------
-    # 跑code用的變數
+    # User-required evaluation config
     # ----------------------------
+    N_VAL   = 2000
+    Q_OUT   = 0.05
+    VAR_INJ = 0.075
+
     BATCH = 200
     CHUNK = 100
 
     # ----------------------------
     # 1) Load estimated test channels (N_TEST=4000)
     # ----------------------------
-
-    npz_path = TEST_NPZ_PATH
+    base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
+    npz_path = os.path.join(base_dir, "channelEstimates_test.npz")
+    if not os.path.exists(npz_path):
+        raise FileNotFoundError(f"找不到 channelEstimates_test.npz:{npz_path}")
 
     data = np.load(npz_path)
     h_dk_all = np_to_torch_complex(data["h_dk"])   # (N_TEST,M,K)
@@ -180,7 +188,7 @@ if __name__ == "__main__":
     n_test = h_dk_all.shape[0]
     print(f"[EVAL] Loaded estimated channels: {npz_path}")
     print(f"[EVAL] N_TEST={n_test}, M={TX_ANT}, N={RIS_UNIT}, K={UAV_COMM}")
-    print(f"[EVAL] N_VAL={N_VAL}, q={OUTAGE_QUANTILE}, inj_var={INJECTION_VARIANCE}, BATCH={BATCH}, CHUNK={CHUNK}")
+    print(f"[EVAL] N_VAL={N_VAL}, q={Q_OUT}, inj_var={VAR_INJ}, BATCH={BATCH}, CHUNK={CHUNK}")
 
     # ----------------------------
     # 2) Load large-scale fading (power)
@@ -190,7 +198,7 @@ if __name__ == "__main__":
     # ----------------------------
     # 3) Load 6 checkpoints (regular + robust)
     # ----------------------------
-    ckpt_dir = CKPT_DIR
+    ckpt_dir = os.path.join(base_dir, "ckpt")
 
     reg_comm_ckpt = os.path.join(ckpt_dir, f"comm_{SETTING_STRING}.ckpt")
     reg_sens_ckpt = os.path.join(ckpt_dir, f"sense_{SETTING_STRING}.ckpt")
@@ -228,6 +236,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(RANDOM_SEED)
 
     reg_sumrate_mean_list, rob_sumrate_mean_list = [], []
+    reg_sumrate_min_list,  rob_sumrate_min_list  = [], []
     reg_snr_var_list,      rob_snr_var_list      = [], []
     reg_snr_pen_list,      rob_snr_pen_list      = [], []
     reg_obj_list,          rob_obj_list          = [], []
@@ -243,29 +252,32 @@ if __name__ == "__main__":
         g_dt = g_dt_all[i0:i1]
 
         # Regular
-        reg_sumrate_mean, reg_snr_var, reg_snr_pen, reg_obj, reg_phi, reg_tx = eval_metrics_mean_sumrate_var_snr(
-            reg_comm, reg_sens, reg_ris,            # 輸入3個net
-            h_dk, h_rk, G, g_dt,                    # 輸入4個估測通道
-            pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,   # 輸入 large scale path loss
-            injection_samples=N_VAL,                # 一個估測通道注入多少Uncertainty
-            injection_variance=INJECTION_VARIANCE,             # 注入雜訊大小
-            outage_q=OUTAGE_QUANTILE,                         # OUTAGE_QUANTILE
+        reg_sumrate_mean, reg_sumrate_min, reg_snr_var, reg_snr_pen, reg_obj, reg_phi, reg_tx = eval_metrics_mean_sumrate_var_snr(
+            reg_comm, reg_sens, reg_ris,
+            h_dk, h_rk, G, g_dt,
+            pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,
+            injection_samples=N_VAL,
+            injection_variance=VAR_INJ,
+            outage_q=Q_OUT,
             chunk=CHUNK
         )
 
         # Robust
-        rob_sumrate_mean, rob_snr_var, rob_snr_pen, rob_obj, rob_phi, rob_tx = eval_metrics_mean_sumrate_var_snr(
+        rob_sumrate_mean, rob_sumrate_min, rob_snr_var, rob_snr_pen, rob_obj, rob_phi, rob_tx = eval_metrics_mean_sumrate_var_snr(
             rob_comm, rob_sens, rob_ris,
             h_dk, h_rk, G, g_dt,
             pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,
             injection_samples=N_VAL,
-            injection_variance=INJECTION_VARIANCE,
-            outage_q=OUTAGE_QUANTILE,
+            injection_variance=VAR_INJ,
+            outage_q=Q_OUT,
             chunk=CHUNK
         )
 
         reg_sumrate_mean_list.append(reg_sumrate_mean.detach().cpu().numpy())
         rob_sumrate_mean_list.append(rob_sumrate_mean.detach().cpu().numpy())
+
+        reg_sumrate_min_list.append(reg_sumrate_min.detach().cpu().numpy())
+        rob_sumrate_min_list.append(rob_sumrate_min.detach().cpu().numpy())
 
         reg_snr_var_list.append(reg_snr_var.detach().cpu().numpy())
         rob_snr_var_list.append(rob_snr_var.detach().cpu().numpy())
@@ -285,17 +297,20 @@ if __name__ == "__main__":
         print(f"[EVAL] {i1}/{n_test} done.")
 
     # concat all (N_TEST,)
-    reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)    # Reg_2000筆注入下的平均速率
-    rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)    # Rob_2000筆注入下的平均速率
+    reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)
+    rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)
 
-    reg_snr_var_all = np.concatenate(reg_snr_var_list, axis=0)              # Reg_2000筆下的第5%的SNR值
-    rob_snr_var_all = np.concatenate(rob_snr_var_list, axis=0)              # Rob_2000筆下的第5%的SNR值
+    reg_sumrate_min_all  = np.concatenate(reg_sumrate_min_list,  axis=0)
+    rob_sumrate_min_all  = np.concatenate(rob_sumrate_min_list,  axis=0)
 
-    reg_snr_pen_all = np.concatenate(reg_snr_pen_list, axis=0)              
+    reg_snr_var_all = np.concatenate(reg_snr_var_list, axis=0)
+    rob_snr_var_all = np.concatenate(rob_snr_var_list, axis=0)
+
+    reg_snr_pen_all = np.concatenate(reg_snr_pen_list, axis=0)
     rob_snr_pen_all = np.concatenate(rob_snr_pen_list, axis=0)
 
-    reg_obj_all = np.concatenate(reg_obj_list, axis=0)                      # Reg_2000筆注入下的平均速率 - 懲罰
-    rob_obj_all = np.concatenate(rob_obj_list, axis=0)                      # Rob_2000筆注入下的平均速率 - 懲罰
+    reg_obj_all = np.concatenate(reg_obj_list, axis=0)
+    rob_obj_all = np.concatenate(rob_obj_list, axis=0)
 
     reg_phi_all = np.concatenate(reg_phi_list, axis=0)
     rob_phi_all = np.concatenate(rob_phi_list, axis=0)
@@ -305,7 +320,7 @@ if __name__ == "__main__":
     # ----------------------------
     # 5) Quick sanity stats (aligned to new meaning)
     # ----------------------------
-    reg_prob_var_viol = float(np.mean(reg_snr_var_all < SENSING_SNR_THRESHOLD)) # 蒐集2000筆下的第5%的SNR值 違反門檻數
+    reg_prob_var_viol = float(np.mean(reg_snr_var_all < SENSING_SNR_THRESHOLD))
     rob_prob_var_viol = float(np.mean(rob_snr_var_all < SENSING_SNR_THRESHOLD))
 
     print("====================================================")
@@ -313,11 +328,11 @@ if __name__ == "__main__":
     print(f"  REG: {float(np.mean(reg_sumrate_mean_all)):.6f} bits/s/Hz")
     print(f"  ROB: {float(np.mean(rob_sumrate_mean_all)):.6f} bits/s/Hz")
 
-    print(f"[Metric B] Mean VaR_{OUTAGE_QUANTILE}(SNR) (linear -> dB):")
+    print(f"[Metric B] Mean VaR_{Q_OUT}(SNR) (linear -> dB):")
     print(f"  REG: {10.0*np.log10(max(float(np.mean(reg_snr_var_all)), 1e-12)):.3f} dB")
     print(f"  ROB: {10.0*np.log10(max(float(np.mean(rob_snr_var_all)), 1e-12)):.3f} dB")
 
-    print(f"[Chance-constraint surrogate] P(VaR_{OUTAGE_QUANTILE}(SNR) < thr={SENSING_SNR_THRESHOLD_dB} dB):")
+    print(f"[Chance-constraint surrogate] P(VaR_{Q_OUT}(SNR) < thr={SENSING_SNR_THRESHOLD_dB} dB):")
     print(f"  REG: {reg_prob_var_viol*100:.2f}%")
     print(f"  ROB: {rob_prob_var_viol*100:.2f}%")
 
@@ -338,6 +353,23 @@ if __name__ == "__main__":
     plt.xlabel("Mean Sum Rate over injections (bits/s/Hz)")
     plt.ylabel("CDF  P(X ≤ x)")
     plt.title(f"Mean Sum Rate over injections — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # ----------------------------
+    # 7) Plot CDF 2: min SumRate among injections
+    # ----------------------------
+    x_min_reg, y_min_reg = empirical_cdf(reg_sumrate_min_all)
+    x_min_rob, y_min_rob = empirical_cdf(rob_sumrate_min_all)
+
+    plt.figure()
+    plt.plot(x_min_reg, y_min_reg, label="REG: min[SumRate]")
+    plt.plot(x_min_rob, y_min_rob, label="ROB: min[SumRate]")
+    plt.xlabel("Min Sum Rate among injections (bits/s/Hz)")
+    plt.ylabel("CDF  P(X ≤ x)")
+    plt.title(f"Min Sum Rate among injections — {SETTING_STRING}")
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()

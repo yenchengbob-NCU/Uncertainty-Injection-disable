@@ -24,24 +24,24 @@ if torch.cuda.is_available():
 # 場景與天線
 # ================================
 TX_ANT      = 6     #發射天線數(M)
-RX_ANT      = 6     #接收天線數(M)
+RX_ANT      = 6     #接收天線數(M)   # 未來可能會刪除 用在接收濾波器的應用
 RIS_UNIT    = 40    #反射元件數(N)
 UAV_COMM    = 2     #通訊無人機(K)
 UAV_TAR     = 1     #感測無人機(1)
 
-FC = 3.5e9                          # 載波頻率(Hz)；例：3.5 GHz（Sub-6）
+FC = 3.5e9                          # 載波頻率(Hz)
 C0 = 3e8                            # 光速(m/s)
-LAMBDA = C0 / FC                    # 波長(m);(8.57 cm)
-BANDWIDTH   = 10e6                  # 系統頻寬(Hz)
-NOISE_POWER = 10e-12                # 直接指定雜訊總功率 (單位：W)
-ESTIMATION_PILOT_POWER = 10e-11     # 導頻功率(單位：W)
-TRANSMIT_POWER_TOTAL = 1            # 傳輸總功率(單位：W) 論文的33dBm
+LAMBDA = C0 / FC                    # 波長(m)                           # 會用於計算Path Loss
+BANDWIDTH   = 10e6                  # 系統頻寬(Hz)                      # 暫時沒有用到
+NOISE_POWER = 10e-11                # 環境雜訊總功率 (單位：W)
+ESTIMATION_PILOT_POWER = 10e-10     # 導頻功率(單位：W)
+TRANSMIT_POWER_TOTAL = 1            # 傳輸總功率(單位：W)
 SENSING_SNR_THRESHOLD_dB = 10       # 感測 SNR 門檻(dB)
-SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)      # 線性比例 2.5
+SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)         # 門檻換算成線性
 
-SENSING_LOSS_WEIGHT    = 50.0     # 罰則係數 λ（越大越重視感測門檻）(0~500)
-RE_POWER_LOSS_WEIGHT   = 100.0     # 罰則係數 λ（越大越重視感測門檻）(0~500)
-TX_POWER_LOSS_WEIGHT   = 100.0     # 罰則係數 λ（越大越重視感測門檻）(0~500)
+SENSING_LOSS_WEIGHT    = 50.0      # 罰則係數 λ1 (0~500)
+RE_POWER_LOSS_WEIGHT   = 100.0     # 罰則係數 λ2 (0~500)
+TX_POWER_LOSS_WEIGHT   = 100.0     # 罰則係數 λ3 (0~500)
 
 # ================================
 # 元件位置 (假設高度在一個平面)
@@ -53,21 +53,21 @@ Q_UAV_UE_LIST   = [(48,2),(48,-2)]
 Q_UAV_TAR       = (10,2)
 
 # ================================
-# 不確定性注入（核心設定）
+# 不確定性注入
 # ================================
-INJECTION_VARIANCE = 0.075 # 新設定{與通道估計誤差脫勾}
-INJECTION_SAMPLES = 1000   # L：每筆樣本注入的通道擾動數（例如 1000）
-OUTAGE_QUANTILE = 0.05     # γ：用 5% 分位做健壯化目標（Robust_Net）
+INJECTION_VARIANCE  = 0.075     # 注入的雜訊功率大小
+INJECTION_SAMPLES   = 1000      # L：每筆樣本注入的通道擾動數
+OUTAGE_QUANTILE     = 0.05      # γ：用 5% 分位做健壯化目標（Robust_Net）
 
 # ================================
-# 訓練/驗證/測試（數量與優化器）
+# 訓練/驗證/測試
 # ================================
-EPOCHS      = 80       # 訓練輪數 一個epoch=MINIBATCHES*BATCH_SIZE 次
-MINIBATCHES = 50        # 每個epoch 有多少 mini-batch   
-BATCH_SIZE  = 1000      # 每個 mini-batch 大小          
-N_VAL       = 2000      # 驗證用通道樣本數
-N_TEST      = 4000      # 測試用通道樣本數
-LEARNING_RATE = 1e-3    # 學習率（實際依網路結構微調）
+EPOCHS          = 50        # 訓練輪數 一個epoch=MINIBATCHES*BATCH_SIZE 次
+MINIBATCHES     = 50        # 每個epoch 有多少 mini-batch   
+BATCH_SIZE      = 1000      # 每個 mini-batch 大小          
+N_VAL           = 2000      # 驗證時通道樣本注入擾動數
+N_TEST          = 4000      # 驗證時通道樣本數
+LEARNING_RATE   = 1e-3      # 學習率（實際依網路結構微調）
 
 # ================================
 # 其他輔助參數
@@ -94,6 +94,13 @@ SAVE_DIR = "./checkpoints/"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 # 建立階層資料夾
-MLP_DIR = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
+MLP_DIR         = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
+CKPT_DIR        = os.path.join(MLP_DIR, "ckpt")
+CURVE_DIR       = os.path.join(MLP_DIR, "training_curves")
+TEST_NPZ_PATH   = os.path.join(MLP_DIR, "channelEstimates_test.npz")
+
 os.makedirs(MLP_DIR, exist_ok=True)
+os.makedirs(CKPT_DIR, exist_ok=True)
+os.makedirs(CURVE_DIR, exist_ok=True)
+
 print(f"[INFO] 輸出資料夾已建立：{MLP_DIR}")

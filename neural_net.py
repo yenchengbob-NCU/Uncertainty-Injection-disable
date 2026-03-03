@@ -7,15 +7,11 @@ import torch.nn.functional as F
 from settings import *  
 
 def build_ckpt_path(kind: str, robust: bool = False) -> str:
-    """
-    Align checkpoint path with main training script.
-
-    kind: "comm" | "sense" | "ris"
-    robust: whether to use robust ckpt naming
-    """
-    base_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
-    ckpt_dir = os.path.join(base_dir, "ckpt")
-    fname = f"{kind}_{'robust_' if robust else ''}{SETTING_STRING}.ckpt"
+    ckpt_dir = CKPT_DIR
+    if robust:
+        fname = f"{kind}_robust_{SETTING_STRING}.ckpt"
+    else:
+        fname = f"{kind}_{SETTING_STRING}.ckpt"
     return os.path.join(ckpt_dir, fname)
 
 VERBOSE_LOAD = True # DEBUG log 開關

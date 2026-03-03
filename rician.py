@@ -4,7 +4,7 @@ import os
 from settings import *  
 
 # ================================
-# 1) 產生 4條 通道
+#    產生 4條 通道
 #    h_dk h_rk G g_dt
 # ================================
 def generate_real_channels(n_networks: int) -> np.ndarray:
@@ -30,10 +30,15 @@ def generate_real_channels(n_networks: int) -> np.ndarray:
         v = np.array([p2[0] - p1[0] , p2[1] - p1[1]], dtype=float)
         d = np.linalg.norm(v)
         u_hat = v / d
-        cos_theta = np.dot(n_hat, u_hat)
-        theta = np.arccos(cos_theta)
-        theta_deg = np.degrees(theta) #弧度換角度
-        #print(f"[DEBUG] STEERING VECTOR 角度：從 p1={p1} 到 p2={p2} 是 {theta:.2f} rad ({theta_deg:.2f} deg)")
+        # signed angle: atan2(det(n,u), dot(n,u))
+        dot = float(np.dot(n_hat, u_hat))
+        dot = float(np.clip(dot, -1.0, 1.0))
+        det = float(n_hat[0] * u_hat[1] - n_hat[1] * u_hat[0])
+
+        theta = float(np.arctan2(det, dot))      # (-pi, pi]
+        theta_deg = float(np.degrees(theta))
+
+        #print(f"[DEBUG] STEERING VECTOR 角度：從 p1={p1} 到 p2={p2} 是 {theta:.4f} rad ({theta_deg:.2f} deg)")
         return theta
 
     # 計算STEERING VECTOR 
@@ -70,7 +75,8 @@ def generate_real_channels(n_networks: int) -> np.ndarray:
     G_LoS = aN_RIS_frB @ aM_BS_RIS.conj().T               # (N,M)
     aM_BS_TAR  = steering_vector(M, the_BS_to_TAR)        # (M,1)
 
-    ''' 輸出 steering vector
+    ''' 
+    #輸出 steering vector
     print("h_rk LoS aN_RIS_UE[:,0]   =", aN_RIS_UE[:, 0])
     print("G LoS RIS-side aN_RIS_frB =", aN_RIS_frB[:, 0])
     print("G LoS BS-side  aM_BS_RIS  =", aM_BS_RIS[:, 0])
@@ -115,7 +121,6 @@ def large_scale_fading():
     Large-scale fading (POWER attenuation factors)
     注意：這裡回傳的是「功率」衰減/增益比例(線性尺度)，不是振幅
     '''
-    M, N, K = TX_ANT, RIS_UNIT, UAV_COMM #簡寫
     ue_list = list(Q_UAV_UE_LIST)        #簡寫
 
     def dist(p1, p2):
@@ -149,7 +154,8 @@ def large_scale_fading():
     # BS->Tar->BS 用 two-way
     pl_BS_TAR_BS = two_way_fading(d_BS_TAR, d_BS_TAR)                      # scalar
 
-    ''' 輸出距離與PathLoss
+    '''
+    #輸出距離與PathLoss
     print(
         f"[DEBUG] Distances (m): "
         f"BS->UE = {d_BS_UE}, "
@@ -169,7 +175,7 @@ def large_scale_fading():
 
 def _estimate_single_channel(H: np.ndarray) -> np.ndarray:
     """
-    LMMSE pilot-aided estimate for y = sqrt(Pp) * H* + n,  n ~ CN(0, N0 I)
+    LMMSE pilot-aided estimate for y = sqrt(Pp) * H + n,  n ~ CN(0, N0 I)
     回傳 H_hat(與 H 同形狀)
     """
     sigma = np.sqrt(NOISE_POWER / 2.0)                                              # CN(0, N0 I) 噪聲
@@ -192,9 +198,7 @@ if __name__ == "__main__":
     g_dt_est = _estimate_single_channel(g_dt_np)
 
     # save files
-    out_dir = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "channelEstimates_test.npz")
+    out_path = TEST_NPZ_PATH
 
     np.savez(
         out_path,
