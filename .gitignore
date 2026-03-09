@@ -60,3 +60,33 @@ desktop.ini
 
 # ---- 評估結果：忽略所有 MLP 下的 CDF 圖 ----
 MLP/**/CDF_*.png
+MLP/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.075TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.075TX_power1W.jpg
+MLP/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.075TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.075TX_power1W.jpg
+MLP/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.075TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_minSumRate_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.05TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.05TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.05TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.05TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.05TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.05TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.075TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.075TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.075TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.15TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.15TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.15TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.15TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.15TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.15TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.3TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.3TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.3TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.3TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.3TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.3TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.45TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.45TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.45TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.45TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.45TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.45TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.9TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-10_INJERR_0.9TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.9TX_power1W/eval_figures/CDF_minSumRate_N0_1e-10_INJERR_0.9TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_14db_punish_(50.0, 100.0, 100.0)/N0_1e-10_INJERR_0.9TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-10_INJERR_0.9TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_5db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_5db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_minSumRate_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_5db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_9db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_meanSumRate_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_9db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_minSumRate_N0_1e-09_INJERR_0.075TX_power1W.jpg
+MLP_3_4/M6_Ris40_K2/THR_9db_punish_(50.0, 100.0, 100.0)/N0_1e-09_INJERR_0.075TX_power1W/eval_figures/CDF_VaR05SNR_N0_1e-09_INJERR_0.075TX_power1W.jpg

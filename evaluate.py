@@ -136,6 +136,7 @@ def eval_metrics_mean_sumrate_var_snr(
     #     mean SumRate, and VaR_q(SNR)
     # ----------------------------
     sumrate_mean = sumrate_samples.mean(dim=1)             # (B,)  E[SumRate] approx
+    sumrate_min  = sumrate_samples.min(dim=1).values       # (B,)  <-- 新增：min rate
 
     k = max(1, int(math.ceil(q * L)))                      # L=2000,q=0.05 -> k=100
     snr_var, _ = torch.kthvalue(snr_samples, k=k, dim=1)   # (B,)  VaR_q(SNR)
@@ -151,7 +152,7 @@ def eval_metrics_mean_sumrate_var_snr(
         - TX_POWER_LOSS_WEIGHT * tx_excess
     )  # (B,)
 
-    return sumrate_mean, snr_var, snr_penalty, obj_out, phi_penalty, tx_excess
+    return sumrate_mean, sumrate_min, snr_var, snr_penalty, obj_out, phi_penalty, tx_excess
 
 
 # ============================================================
@@ -228,6 +229,7 @@ if __name__ == "__main__":
         torch.cuda.manual_seed_all(RANDOM_SEED)
 
     reg_sumrate_mean_list, rob_sumrate_mean_list = [], []
+    reg_sumrate_min_list,  rob_sumrate_min_list  = [], []   # <-- 新增
     reg_snr_var_list,      rob_snr_var_list      = [], []
     reg_snr_pen_list,      rob_snr_pen_list      = [], []
     reg_obj_list,          rob_obj_list          = [], []
@@ -243,18 +245,18 @@ if __name__ == "__main__":
         g_dt = g_dt_all[i0:i1]
 
         # Regular
-        reg_sumrate_mean, reg_snr_var, reg_snr_pen, reg_obj, reg_phi, reg_tx = eval_metrics_mean_sumrate_var_snr(
-            reg_comm, reg_sens, reg_ris,            # 輸入3個net
-            h_dk, h_rk, G, g_dt,                    # 輸入4個估測通道
-            pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,   # 輸入 large scale path loss
-            injection_samples=N_VAL,                # 一個估測通道注入多少Uncertainty
-            injection_variance=INJECTION_VARIANCE,             # 注入雜訊大小
-            outage_q=OUTAGE_QUANTILE,                         # OUTAGE_QUANTILE
+        reg_sumrate_mean, reg_sumrate_min, reg_snr_var, reg_snr_pen, reg_obj, reg_phi, reg_tx = eval_metrics_mean_sumrate_var_snr(
+            reg_comm, reg_sens, reg_ris,                # 輸入3個net
+            h_dk, h_rk, G, g_dt,                        # 輸入4個估測通道
+            pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,       # 輸入 large scale path loss
+            injection_samples=N_VAL,                    # 一個估測通道注入多少Uncertainty
+            injection_variance=INJECTION_VARIANCE,      # 注入雜訊大小
+            outage_q=OUTAGE_QUANTILE,                   # OUTAGE_QUANTILE
             chunk=CHUNK
         )
 
         # Robust
-        rob_sumrate_mean, rob_snr_var, rob_snr_pen, rob_obj, rob_phi, rob_tx = eval_metrics_mean_sumrate_var_snr(
+        rob_sumrate_mean, rob_sumrate_min, rob_snr_var, rob_snr_pen, rob_obj, rob_phi, rob_tx = eval_metrics_mean_sumrate_var_snr(
             rob_comm, rob_sens, rob_ris,
             h_dk, h_rk, G, g_dt,
             pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,
@@ -266,6 +268,9 @@ if __name__ == "__main__":
 
         reg_sumrate_mean_list.append(reg_sumrate_mean.detach().cpu().numpy())
         rob_sumrate_mean_list.append(rob_sumrate_mean.detach().cpu().numpy())
+
+        reg_sumrate_min_list.append(reg_sumrate_min.detach().cpu().numpy())   # <-- 新增
+        rob_sumrate_min_list.append(rob_sumrate_min.detach().cpu().numpy())   # <-- 新增
 
         reg_snr_var_list.append(reg_snr_var.detach().cpu().numpy())
         rob_snr_var_list.append(rob_snr_var.detach().cpu().numpy())
@@ -287,6 +292,9 @@ if __name__ == "__main__":
     # concat all (N_TEST,)
     reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)    # Reg_2000筆注入下的平均速率
     rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)    # Rob_2000筆注入下的平均速率
+
+    reg_sumrate_min_all  = np.concatenate(reg_sumrate_min_list,  axis=0)   # <-- 新增
+    rob_sumrate_min_all  = np.concatenate(rob_sumrate_min_list,  axis=0)   # <-- 新增
 
     reg_snr_var_all = np.concatenate(reg_snr_var_list, axis=0)              # Reg_2000筆下的第5%的SNR值
     rob_snr_var_all = np.concatenate(rob_snr_var_list, axis=0)              # Rob_2000筆下的第5%的SNR值
@@ -326,6 +334,11 @@ if __name__ == "__main__":
     print(f"  ROB: {float(np.mean(rob_obj_all)):.6f}")
     print("====================================================")
 
+    # 建資料夾
+    fig_dir = os.path.join(MLP_DIR, "eval_figures")
+    os.makedirs(fig_dir, exist_ok=True)
+    q_pct = int(round(OUTAGE_QUANTILE * 100))
+
     # ----------------------------
     # 6) Plot CDF 1: E[SumRate]
     # ----------------------------
@@ -341,4 +354,43 @@ if __name__ == "__main__":
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"CDF_meanSumRate_{SETTING_STRING}.jpg"), format="jpg")
     plt.show()
+    plt.close()
+
+    # (6-2) PDF 1: CDF of VaR_q(SNR)  (x 軸用 dB)
+    reg_snr_var_db = 10.0 * np.log10(np.clip(reg_snr_var_all, 1e-12, None))
+    rob_snr_var_db = 10.0 * np.log10(np.clip(rob_snr_var_all, 1e-12, None))
+    x_v_reg, y_v_reg = empirical_cdf(reg_snr_var_db)
+    x_v_rob, y_v_rob = empirical_cdf(rob_snr_var_db)
+
+    plt.figure()
+    plt.plot(x_v_reg, y_v_reg, label=f"REG: VaR_{OUTAGE_QUANTILE}(SNR)")
+    plt.plot(x_v_rob, y_v_rob, label=f"ROB: VaR_{OUTAGE_QUANTILE}(SNR)")
+    plt.xlabel(f"VaR_{OUTAGE_QUANTILE}(SNR)  (dB)")
+    plt.ylabel("CDF  P(X ≤ x)")
+    plt.title(f"VaR_{OUTAGE_QUANTILE}(SNR) CDF — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"CDF_VaR{q_pct:02d}SNR_{SETTING_STRING}.jpg"), format="jpg")
+    plt.show()
+    plt.close()
+
+    # (6-3) PDF 2: CDF of min SumRate among injections
+    x_min_reg, y_min_reg = empirical_cdf(reg_sumrate_min_all)
+    x_min_rob, y_min_rob = empirical_cdf(rob_sumrate_min_all)
+
+    plt.figure()
+    plt.plot(x_min_reg, y_min_reg, label="REG: min[SumRate]")
+    plt.plot(x_min_rob, y_min_rob, label="ROB: min[SumRate]")
+    plt.xlabel("Min Sum Rate among injections (bits/s/Hz)")
+    plt.ylabel("CDF  P(X ≤ x)")
+    plt.title(f"Min Sum Rate among injections — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"CDF_minSumRate_{SETTING_STRING}.jpg"), format="jpg")
+    plt.show()
+    plt.close()
+

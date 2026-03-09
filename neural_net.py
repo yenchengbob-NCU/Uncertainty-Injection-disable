@@ -141,38 +141,39 @@ class BaseMLP(nn.Module):
 
     # -- 感測 SNR
     def compute_sense_snr(self,
-                        g_dt: torch.Tensor,   # (B,M,1) small-scale
+                        g_dt: torch.Tensor,   # (B,M,1)
                         W_S: torch.Tensor,    # (B,M,1)
                         W_C: torch.Tensor,    # (B,M,K)
                         pl_BS_TAR_BS          # scalar power
                         ) -> torch.Tensor:    # (B,)
-        # type/device align
+
+        # 0) type/device align
         device, dtype = W_C.device, W_C.dtype
         g_dt, W_S, W_C = [t.to(device=device, dtype=dtype) for t in (g_dt, W_S, W_C)]
-
-        # 等效通道 v_t
-        v_t = g_dt @ torch.conj(g_dt).transpose(1, 2)                           # (B,M,M) 
-
-        # Matchfiliter !!要修改!!
         eps = 1e-12
-        u = g_dt / torch.linalg.norm(g_dt, dim=1, keepdim=True).clamp_min(eps)  # (B,M,1)
-        uH = u.conj().transpose(1, 2)                                           # (B,1,M)
- 
-        # --- 分子: |u^H G_t w_k|^2 + |u^H G_t w_s|^2 ---
-        term_comm  = uH @ v_t @ W_C                                             # (B,1,K)                        
-        num_comm   = (term_comm.abs()**2).sum(dim=(1, 2))                       # (B,)     
-        term_sense = uH @ v_t @ W_S                                             # (B,1,1) 
-        num_sense  = (term_sense.abs()**2).sum(dim=1).squeeze(-1)               # (B,)  
 
-        numer = torch.as_tensor(pl_BS_TAR_BS, device=device, dtype=num_comm.dtype) * (num_comm + num_sense)  # (B,)
-        # --- 分母: σ_t^2 * (u^H u) ---
-        # uH: (B,1,M), u: (B,M,1) -> uH@u: (B,1,1)
-        uHu = (uH @ u).real.squeeze(-1).squeeze(-1).clamp_min(eps)              # (B,)
-        noise = torch.as_tensor(NOISE_POWER, device=device, dtype=numer.dtype)  # scalar
+        # 1) 等效通道 v_t = g_dt g_dt^H
+        #    (B,M,1) -> (B,M,M)
+        v_t = g_dt @ g_dt.conj().transpose(1, 2)  # (B,M,M)
 
-        denom = noise * uHu                                                     # (B,)
+        # 2) Q = W_C W_C^H + W_S W_S^H  (發射端能量/協方差)
+        Q_comm  = W_C @ W_C.conj().transpose(1, 2)  # (B,M,M)
+        Q_sense = W_S @ W_S.conj().transpose(1, 2)  # (B,M,M)
+        Q = Q_comm + Q_sense                        # (B,M,M)
 
-        return numer / denom                                                    # (B,)
+        # 3) A = v_t Q v_t^H   (理論上 Hermitian PSD)
+        A = v_t @ Q @ v_t.conj().transpose(1, 2)    # (B,M,M)
+
+        # 4) SNR_max = (pl / noise) * lambda_max(A)
+        #    用 eigvalsh 只取 eigenvalues，可反傳，避開 complex eigenvector backward 問題
+        eigvals = torch.linalg.eigvalsh(A)          # (B,M) real, ascending
+        lambda_max = eigvals[:, -1].clamp_min(0.0)  # (B,) 避免數值誤差出現極小負值
+
+        pl = torch.as_tensor(pl_BS_TAR_BS, device=device, dtype=lambda_max.dtype)
+        noise = torch.as_tensor(NOISE_POWER, device=device, dtype=lambda_max.dtype)
+
+        snr_max = (pl / noise) * lambda_max         # (B,)
+        return snr_max
 
     # -- 模型存取
     def load_model(self, tag: str = "", verbose: bool = False):
