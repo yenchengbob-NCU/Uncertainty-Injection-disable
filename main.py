@@ -238,6 +238,132 @@ def forward_objective_robust(comm_net, sense_net, ris_net,
 
 
 # ------------------------------
+# Robust validation (hard probability penalty)
+# ------------------------------
+@torch.no_grad()
+def forward_validation_robust(comm_net, sense_net, ris_net,
+                              h_dk, h_rk, G, g_dt,
+                              pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS):
+    """
+    Robust validation:
+    - NN輸入：估測通道
+    - 對每條估測通道做 N_VAL 次 uncertainty injection
+    - ValObj 用硬機率版本 penalty
+    - 顯示值先保留：
+        1) sum_rate_mean  = batch平均 injection平均後的 SumRate
+        2) sense_snr_mean_db = batch平均 injection平均後的 SNR(dB)
+    """
+
+    def _add_complex_awgn(x: torch.Tensor, variance: float) -> torch.Tensor:
+        device = x.device
+        sigma = torch.sqrt(torch.as_tensor(variance / 2.0, device=device, dtype=torch.float32))
+        nr = sigma * torch.randn(x.shape, device=device, dtype=torch.float32)
+        ni = sigma * torch.randn(x.shape, device=device, dtype=torch.float32)
+        n = torch.complex(nr, ni).to(dtype=x.dtype)
+        return x + n
+
+    eps = 1e-12
+
+    # 1) design variables (no injection)
+    W_C = comm_net(h_dk, h_rk, G, g_dt)   # (B,M,K)
+    W_S = sense_net(h_dk, h_rk, G, g_dt)  # (B,M,1)
+    phi = ris_net(h_dk, h_rk, G, g_dt)    # (B,N)
+
+    # 2) penalties (compute once)
+    phi_abs = phi.abs()
+    phi_excess = torch.clamp(phi_abs - 1.0, min=0.0)
+    phi_penalty_mean = phi_excess.mean(dim=1).mean()   # scalar
+
+    power_comm  = (W_C.abs() ** 2).sum(dim=(1, 2))     # (B,)
+    power_sense = (W_S.abs() ** 2).sum(dim=(1, 2))     # (B,)
+    tx_power = power_comm + power_sense                # (B,)
+    tx_power_mean = tx_power.mean()                    # scalar
+
+    tx_excess = torch.clamp(tx_power - TRANSMIT_POWER_TOTAL, min=0.0)
+    tx_penalty_mean = tx_excess.mean()                 # scalar
+
+    # 3) validation under injections
+    B, M, K = h_dk.shape
+    N = h_rk.shape[1]
+    S = int(N_VAL)          # validation 用的 injection 次數
+    chunk = 50              # memory guard
+
+    sumrate_chunks = []
+    snr_chunks = []
+
+    for s0 in range(0, S, chunk):
+        s = min(chunk, S - s0)
+
+        h_dk_rep = h_dk.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
+        h_rk_rep = h_rk.unsqueeze(1).expand(B, s, N, K).reshape(B * s, N, K)
+        G_rep    = G.unsqueeze(1).expand(B, s, N, M).reshape(B * s, N, M)
+        g_dt_rep = g_dt.unsqueeze(1).expand(B, s, M, 1).reshape(B * s, M, 1)
+
+        h_dk_inj = _add_complex_awgn(h_dk_rep, INJECTION_VARIANCE)
+        h_rk_inj = _add_complex_awgn(h_rk_rep, INJECTION_VARIANCE)
+        G_inj    = _add_complex_awgn(G_rep,    INJECTION_VARIANCE)
+        g_dt_inj = _add_complex_awgn(g_dt_rep, INJECTION_VARIANCE)
+
+        W_C_rep = W_C.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
+        W_S_rep = W_S.unsqueeze(1).expand(B, s, M, 1).reshape(B * s, M, 1)
+        phi_rep = phi.unsqueeze(1).expand(B, s, N).reshape(B * s, N)
+
+        sinrs = comm_net.compute_comm_sinrs(
+            h_dk_inj, h_rk_inj, G_inj, phi_rep, W_S_rep, W_C_rep,
+            pl_BS_UE, pl_BS_RIS_UE
+        )  # (B*s,K)
+
+        rates = comm_net.compute_rates(sinrs)   # (B*s,K)
+        sum_rate = rates.sum(dim=1)             # (B*s,)
+
+        sense_snr = comm_net.compute_sense_snr(
+            g_dt_inj, W_S_rep, W_C_rep, pl_BS_TAR_BS
+        ).real                                  # (B*s,)
+
+        sumrate_chunks.append(sum_rate.reshape(B, s))   # (B,s)
+        snr_chunks.append(sense_snr.reshape(B, s))      # (B,s)
+
+    sumrate_samples = torch.cat(sumrate_chunks, dim=1)  # (B,S)
+    snr_samples     = torch.cat(snr_chunks,     dim=1)  # (B,S)
+
+    # 4) validation metrics
+    q = float(OUTAGE_QUANTILE)
+
+    # ROB mean rate = batch平均 injection平均
+    sumrate_mean_per_sample = sumrate_samples.mean(dim=1)     # (B,)
+    sumrate_mean = sumrate_mean_per_sample.mean()             # scalar
+
+    # ROB SNR violation probability = 每條通道自己的違反比例
+    snr_vprob_per_sample = (snr_samples < SENSING_SNR_THRESHOLD).float().mean(dim=1)   # (B,)
+
+    # 硬機率 penalty：超過 q 才罰
+    snr_penalty_per_sample = torch.clamp(snr_vprob_per_sample - q, min=0.0)            # (B,)
+    snr_penalty_mean = snr_penalty_per_sample.mean()                                    # scalar
+
+    # 顯示用：ROB SNR = batch平均 injection平均後的 SNR(dB)
+    sense_snr_mean_db = (10.0 * torch.log10(snr_samples.clamp_min(eps))).mean()
+
+    # 5) objective
+    objective = (
+        sumrate_mean
+        - SENSING_LOSS_WEIGHT  * snr_penalty_mean
+        - RE_POWER_LOSS_WEIGHT * phi_penalty_mean
+        - TX_POWER_LOSS_WEIGHT * tx_penalty_mean
+    )
+
+    logs = {
+        "sum_rate_mean":        sumrate_mean.detach(),        # ROB: batch平均 injection平均後的 SumRate
+        "sense_snr_mean_db":    sense_snr_mean_db.detach(),   # ROB: batch平均 injection平均後的 SNR(dB)
+        "snr_penalty_mean":     snr_penalty_mean.detach(),
+        "phi_penalty_mean":     phi_penalty_mean.detach(),
+        "tx_power_mean":        tx_power_mean.detach(),
+        "tx_penalty_mean":      tx_penalty_mean.detach(),
+        "objective":            objective.detach(),
+    }
+    return objective, logs
+
+
+# ------------------------------
 # main
 # ------------------------------
 if __name__ == "__main__":
@@ -372,10 +498,10 @@ if __name__ == "__main__":
             # 產生 val batch（兩套同一批估測通道，公平）
             h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(BATCH_SIZE)
 
-            h_dk_est = _estimate_single_channel(h_dk_np)
-            h_rk_est = _estimate_single_channel(h_rk_np)
-            G_est    = _estimate_single_channel(G_np)
-            g_dt_est = _estimate_single_channel(g_dt_np)
+            h_dk_est = _estimate_single_channel(h_dk_np)   # (B,M,K)
+            h_rk_est = _estimate_single_channel(h_rk_np)   # (B,N,K)
+            G_est    = _estimate_single_channel(G_np)      # (B,N,M)
+            g_dt_est = _estimate_single_channel(g_dt_np)   # (B,M,1)
 
             h_dk = np_to_torch_complex(h_dk_est)
             h_rk = np_to_torch_complex(h_rk_est)
@@ -388,19 +514,19 @@ if __name__ == "__main__":
                 h_dk, h_rk, G, g_dt,
                 pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS
             )
-            reg_val_obj        = float(reg_val_obj_t.detach().cpu())
-            reg_val_sum_rate   = float(reg_val_logs["sum_rate_mean"].cpu())
-            reg_val_snr_db     = float(reg_val_logs["sense_snr_mean_db"].cpu())
+            reg_val_obj      = float(reg_val_obj_t.detach().cpu())
+            reg_val_sum_rate = float(reg_val_logs["sum_rate_mean"].cpu())
+            reg_val_snr_db   = float(reg_val_logs["sense_snr_mean_db"].cpu())
 
             # --- robust val ---
-            rob_val_obj_t, rob_val_logs = forward_objective_robust(
+            rob_val_obj_t, rob_val_logs = forward_validation_robust(
                 robust_comm_net, robust_sense_net, robust_ris_net,
                 h_dk, h_rk, G, g_dt,
                 pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS
             )
-            rob_val_obj        = float(rob_val_obj_t.detach().cpu())
-            rob_val_sum_rate   = float(rob_val_logs["sum_rate_mean"].cpu())
-            rob_val_snr_db     = float(rob_val_logs["sense_snr_mean_db"].cpu())
+            rob_val_obj      = float(rob_val_obj_t.detach().cpu())
+            rob_val_sum_rate = float(rob_val_logs["sum_rate_mean"].cpu())
+            rob_val_snr_db   = float(rob_val_logs["sense_snr_mean_db"].cpu())
 
         # ===============================
         # 記錄 curves（分開存檔，供 --plot 使用）
@@ -416,8 +542,8 @@ if __name__ == "__main__":
 
         print(
             f"[Epoch {ep:03d}]\n"
-            f"  REG | TrainObj: {reg_obj_ep: .4e} | ValObj: {reg_val_obj: .4e} | Val SumRate: {reg_val_sum_rate: .4e} | Val SenseSNR(dB): {reg_val_snr_db: .3f}\n"
-            f"  ROB | TrainObj: {rob_obj_ep: .4e} | ValObj: {rob_val_obj: .4e} | Val SumRate: {rob_val_sum_rate: .4e} | Val SenseSNR(dB): {rob_val_snr_db: .3f}"
+            f"  REG | TrainObj: {reg_obj_ep: .4e} | ValObj: {reg_val_obj: .4e} | Val SumRate: {reg_val_sum_rate: .4e} | Val SNR(dB): {reg_val_snr_db: .3f}\n"
+            f"  ROB | TrainObj: {rob_obj_ep: .4e} | ValObj: {rob_val_obj: .4e} | Val SumRate: {rob_val_sum_rate: .4e} | Val SNR(dB): {rob_val_snr_db: .3f}"
         )
 
         # ---------- SAVE BEST CKPT ----------
