@@ -246,7 +246,7 @@ def forward_validation_robust(comm_net, sense_net, ris_net,
                               pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS):
     """
     Robust validation:
-    - NN輸入：估測通道
+    - NN輸入:估測通道
     - 對每條估測通道做 N_VAL 次 uncertainty injection
     - ValObj 用硬機率版本 penalty
     - 顯示值先保留：

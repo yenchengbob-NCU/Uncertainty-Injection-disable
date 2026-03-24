@@ -9,7 +9,6 @@ from settings import *
 from neural_net import *
 from rician import large_scale_fading
 
-
 # ============================================================
 # Helpers
 # ============================================================
@@ -36,7 +35,7 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
 
 
 @torch.no_grad()
-def eval_metrics_mean_sumrate_var_snr(
+def eval_metrics_mean_sumrate_prob_snr(
     comm_net, sense_net, ris_net,             # reg 或 rob
     h_dk_hat: torch.Tensor,                   # (B,M,K) estimated
     h_rk_hat: torch.Tensor,                   # (B,N,K) estimated
@@ -44,28 +43,27 @@ def eval_metrics_mean_sumrate_var_snr(
     g_dt_hat: torch.Tensor,                   # (B,M,1) estimated
     pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,     # large-scale fading (power)
     injection_samples: int,                   # N_VAL (=2000)
-    injection_variance: float,                # 0.075
+    injection_variance: float,                # 0.075 (可改)
     outage_q: float,                          # 0.05
     chunk: int = 100
 ):
     """
-    對齊圖片公式評估：
-      E[SumRate] - λ * max(thr - VaR_q(SNR), 0)  (再扣 phi/tx penalty)
+    對齊新的 chance-constraint 機率版本評估：
+    E[SumRate] - λ * max(P(SNR < thr) - eps, 0)  (再扣 phi/tx penalty)
 
-    回傳 (per-sample):
-      sumrate_mean:        (B,) = mean over injections
-      sumrate_min:         (B,) = min over injections
-      snr_var:             (B,) = VaR_q(SNR)  (kth smallest)
-      snr_penalty:         (B,) = max(thr - snr_var, 0)
-      snr_violation_prob:  (B,) = empirical P(SNR < thr) over injections
-      obj_out:             (B,) = sumrate_mean - λsnr*snr_penalty - λphi*phi_penalty - λp*tx_excess
-      phi_penalty:         (B,) = mean(max(|phi|-1,0)) over N
-      tx_excess:           (B,) = max(Ptx - Pmax, 0)
+    回傳 (per-channel sample):
+    sumrate_mean:        (B,) = mean over injections
+    sumrate_min:         (B,) = min over injections
+    snr_violation_prob:  (B,) = empirical P(SNR < thr)
+    備用數據
+    snr_penalty:         (B,) = max(snr_violation_prob - eps, 0)
+    obj_out:             (B,) = sumrate_mean - λsnr*snr_penalty - λphi*phi_penalty - λp*tx_excess
+    phi_penalty:         (B,) = mean(max(|phi|-1,0)) over N
+    tx_excess:           (B,) = max(Ptx - Pmax, 0)
     """
-    comm_net.eval()
-    sense_net.eval()
-    ris_net.eval()
+    comm_net.eval(); sense_net.eval(); ris_net.eval()
 
+    # 簡寫
     B, M, K = h_dk_hat.shape
     N = h_rk_hat.shape[1]
     L = int(injection_samples)
@@ -106,10 +104,10 @@ def eval_metrics_mean_sumrate_var_snr(
         # additive injection
         cdtype = h_dk_rep.dtype
         device = h_dk_rep.device
-        h_dk_inj = h_dk_rep + complex_awgn(h_dk_rep.shape, injection_variance, device, cdtype)
-        h_rk_inj = h_rk_rep + complex_awgn(h_rk_rep.shape, injection_variance, device, cdtype)
-        G_inj    = G_rep    + complex_awgn(G_rep.shape,    injection_variance, device, cdtype)
-        g_dt_inj = g_dt_rep + complex_awgn(g_dt_rep.shape, injection_variance, device, cdtype)
+        h_dk_inj = h_dk_rep + complex_awgn(h_dk_rep.shape, injection_variance, device, cdtype) # 注入
+        h_rk_inj = h_rk_rep + complex_awgn(h_rk_rep.shape, injection_variance, device, cdtype) # 注入
+        G_inj    = G_rep    + complex_awgn(G_rep.shape,    injection_variance, device, cdtype) # 注入
+        g_dt_inj = g_dt_rep + complex_awgn(g_dt_rep.shape, injection_variance, device, cdtype) # 注入
 
         # replicate design vars to match (B*s,...)
         W_C_rep = W_C.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
@@ -137,16 +135,17 @@ def eval_metrics_mean_sumrate_var_snr(
 
     # ----------------------------
     # (C) Metrics per sample (B,)
+    #     mean SumRate, and empirical violation probability
     # ----------------------------
     sumrate_mean = sumrate_samples.mean(dim=1)             # (B,) E[SumRate] approx
     sumrate_min  = sumrate_samples.min(dim=1).values       # (B,) min rate
 
-    k = max(1, int(math.ceil(q * L)))                      # L=2000,q=0.05 -> k=100
-    snr_var, _ = torch.kthvalue(snr_samples, k=k, dim=1)   # (B,) VaR_q(SNR)
-    snr_penalty = torch.clamp(SENSING_SNR_THRESHOLD - snr_var, min=0.0)  # (B,)
+    # 真正機率版本：
+    # 每條 sample 的 2000 次 injection 中，有多少比例 SNR < threshold
+    snr_violation_prob = (snr_samples < SENSING_SNR_THRESHOLD).float().mean(dim=1)   # (B,)
 
-    # 新增：每條 sample 在 L 次 injection 中違反 sensing threshold 的機率
-    snr_violation_prob = (snr_samples < SENSING_SNR_THRESHOLD).to(torch.float32).mean(dim=1)  # (B,)
+    # 若違反機率超過 epsilon=q，才給懲罰
+    snr_penalty = torch.clamp(snr_violation_prob - q, min=0.0)   # (B,)
 
     # ----------------------------
     # (D) Objective per sample (B,)
@@ -158,16 +157,7 @@ def eval_metrics_mean_sumrate_var_snr(
         - TX_POWER_LOSS_WEIGHT * tx_excess
     )  # (B,)
 
-    return (
-        sumrate_mean,
-        sumrate_min,
-        snr_var,
-        snr_penalty,
-        snr_violation_prob,
-        obj_out,
-        phi_penalty,
-        tx_excess,
-    )
+    return sumrate_mean, sumrate_min, snr_violation_prob, snr_penalty, obj_out, phi_penalty, tx_excess
 
 
 # ============================================================
@@ -184,6 +174,7 @@ if __name__ == "__main__":
     # ----------------------------
     # 1) Load estimated test channels (N_TEST=4000)
     # ----------------------------
+
     npz_path = TEST_NPZ_PATH
 
     data = np.load(npz_path)
@@ -244,9 +235,8 @@ if __name__ == "__main__":
 
     reg_sumrate_mean_list, rob_sumrate_mean_list = [], []
     reg_sumrate_min_list,  rob_sumrate_min_list  = [], []
-    reg_snr_var_list,      rob_snr_var_list      = [], []
+    reg_snr_vprob_list,    rob_snr_vprob_list    = [], []
     reg_snr_pen_list,      rob_snr_pen_list      = [], []
-    reg_snr_vprob_list,    rob_snr_vprob_list    = [], []   # <-- 新增
     reg_obj_list,          rob_obj_list          = [], []
     reg_phi_list,          rob_phi_list          = [], []
     reg_tx_list,           rob_tx_list           = [], []
@@ -260,36 +250,18 @@ if __name__ == "__main__":
         g_dt = g_dt_all[i0:i1]
 
         # Regular
-        (
-            reg_sumrate_mean,
-            reg_sumrate_min,
-            reg_snr_var,
-            reg_snr_pen,
-            reg_snr_vprob,
-            reg_obj,
-            reg_phi,
-            reg_tx,
-        ) = eval_metrics_mean_sumrate_var_snr(
-            reg_comm, reg_sens, reg_ris,
-            h_dk, h_rk, G, g_dt,
-            pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,
-            injection_samples=N_VAL,
-            injection_variance=INJECTION_VARIANCE,
-            outage_q=OUTAGE_QUANTILE,
+        reg_sumrate_mean, reg_sumrate_min, reg_snr_vprob, reg_snr_pen, reg_obj, reg_phi, reg_tx = eval_metrics_mean_sumrate_prob_snr(
+            reg_comm, reg_sens, reg_ris,                # 輸入3個net
+            h_dk, h_rk, G, g_dt,                        # 輸入4個估測通道
+            pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,       # 輸入 large scale path loss
+            injection_samples=N_VAL,                    # 一個估測通道注入多少Uncertainty
+            injection_variance=INJECTION_VARIANCE,      # 注入雜訊大小
+            outage_q=OUTAGE_QUANTILE,                   # OUTAGE_QUANTILE
             chunk=CHUNK
         )
 
         # Robust
-        (
-            rob_sumrate_mean,
-            rob_sumrate_min,
-            rob_snr_var,
-            rob_snr_pen,
-            rob_snr_vprob,
-            rob_obj,
-            rob_phi,
-            rob_tx,
-        ) = eval_metrics_mean_sumrate_var_snr(
+        rob_sumrate_mean, rob_sumrate_min, rob_snr_vprob, rob_snr_pen, rob_obj, rob_phi, rob_tx = eval_metrics_mean_sumrate_prob_snr(
             rob_comm, rob_sens, rob_ris,
             h_dk, h_rk, G, g_dt,
             pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS,
@@ -302,17 +274,14 @@ if __name__ == "__main__":
         reg_sumrate_mean_list.append(reg_sumrate_mean.detach().cpu().numpy())
         rob_sumrate_mean_list.append(rob_sumrate_mean.detach().cpu().numpy())
 
-        reg_sumrate_min_list.append(reg_sumrate_min.detach().cpu().numpy())
-        rob_sumrate_min_list.append(rob_sumrate_min.detach().cpu().numpy())
+        reg_sumrate_min_list.append(reg_sumrate_min.detach().cpu().numpy())   
+        rob_sumrate_min_list.append(rob_sumrate_min.detach().cpu().numpy())  
 
-        reg_snr_var_list.append(reg_snr_var.detach().cpu().numpy())
-        rob_snr_var_list.append(rob_snr_var.detach().cpu().numpy())
+        reg_snr_vprob_list.append(reg_snr_vprob.detach().cpu().numpy())
+        rob_snr_vprob_list.append(rob_snr_vprob.detach().cpu().numpy())
 
         reg_snr_pen_list.append(reg_snr_pen.detach().cpu().numpy())
         rob_snr_pen_list.append(rob_snr_pen.detach().cpu().numpy())
-
-        reg_snr_vprob_list.append(reg_snr_vprob.detach().cpu().numpy())   # <-- 新增
-        rob_snr_vprob_list.append(rob_snr_vprob.detach().cpu().numpy())   # <-- 新增
 
         reg_obj_list.append(reg_obj.detach().cpu().numpy())
         rob_obj_list.append(rob_obj.detach().cpu().numpy())
@@ -326,69 +295,49 @@ if __name__ == "__main__":
         print(f"[EVAL] {i1}/{n_test} done.")
 
     # concat all (N_TEST,)
-    reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)
-    rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)
+    reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)    # Reg_2000筆注入下的平均速率
+    rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)    # Rob_2000筆注入下的平均速率
 
-    reg_sumrate_min_all  = np.concatenate(reg_sumrate_min_list,  axis=0)
-    rob_sumrate_min_all  = np.concatenate(rob_sumrate_min_list,  axis=0)
+    reg_sumrate_min_all  = np.concatenate(reg_sumrate_min_list,  axis=0)    # Reg_2000筆注入下的最小速率
+    rob_sumrate_min_all  = np.concatenate(rob_sumrate_min_list,  axis=0)    # Rob_2000筆注入下的最小速率
 
-    reg_snr_var_all = np.concatenate(reg_snr_var_list, axis=0)
-    rob_snr_var_all = np.concatenate(rob_snr_var_list, axis=0)
+    reg_snr_vprob_all = np.concatenate(reg_snr_vprob_list, axis=0)          # Reg_2000筆注入下的SNR違反機率
+    rob_snr_vprob_all = np.concatenate(rob_snr_vprob_list, axis=0)          # Rob_2000筆注入下的SNR違反機率
 
-    reg_snr_pen_all = np.concatenate(reg_snr_pen_list, axis=0)
-    rob_snr_pen_all = np.concatenate(rob_snr_pen_list, axis=0)
-
-    reg_snr_vprob_all = np.concatenate(reg_snr_vprob_list, axis=0)   # <-- 新增
-    rob_snr_vprob_all = np.concatenate(rob_snr_vprob_list, axis=0)   # <-- 新增
-
-    reg_obj_all = np.concatenate(reg_obj_list, axis=0)
-    rob_obj_all = np.concatenate(rob_obj_list, axis=0)
-
-    reg_phi_all = np.concatenate(reg_phi_list, axis=0)
-    rob_phi_all = np.concatenate(rob_phi_list, axis=0)
-    reg_tx_all  = np.concatenate(reg_tx_list,  axis=0)
-    rob_tx_all  = np.concatenate(rob_tx_list,  axis=0)
+    # 以下是備用數據
+    reg_snr_pen_all = np.concatenate(reg_snr_pen_list, axis=0)              # Reg_2000筆注入下的SNR機率懲罰值            
+    rob_snr_pen_all = np.concatenate(rob_snr_pen_list, axis=0)              # Rob_2000筆注入下的SNR機率懲罰值
+    reg_obj_all = np.concatenate(reg_obj_list, axis=0)                      # Reg_2000筆注入下的總目標值                  
+    rob_obj_all = np.concatenate(rob_obj_list, axis=0)                      # Rob_2000筆注入下的總目標值  
+    reg_phi_all = np.concatenate(reg_phi_list, axis=0)                      # Reg_2000筆注入下的RIS振幅超限懲罰值
+    rob_phi_all = np.concatenate(rob_phi_list, axis=0)                      # Rob_2000筆注入下的RIS振幅超限懲罰值
+    reg_tx_all  = np.concatenate(reg_tx_list,  axis=0)                      # Reg_2000筆注入下的總發射功率超限懲罰值
+    rob_tx_all  = np.concatenate(rob_tx_list,  axis=0)                      # Rob_2000筆注入下的總發射功率超限懲罰值
 
     # ----------------------------
-    # 5) Quick sanity stats
+    # 5) Print
     # ----------------------------
-    # 舊指標：VaR surrogate
-    reg_prob_var_viol = float(np.mean(reg_snr_var_all < SENSING_SNR_THRESHOLD))
-    rob_prob_var_viol = float(np.mean(rob_snr_var_all < SENSING_SNR_THRESHOLD))
+    reg_mean_sumrate = float(np.mean(reg_sumrate_mean_all))
+    rob_mean_sumrate = float(np.mean(rob_sumrate_mean_all))
 
-    # 新指標 1：平均 empirical violation probability
-    reg_mean_snr_vprob = float(np.mean(reg_snr_vprob_all))
-    rob_mean_snr_vprob = float(np.mean(rob_snr_vprob_all))
+    reg_min_sumrate = float(np.mean(reg_sumrate_min_all))
+    rob_min_sumrate = float(np.mean(rob_sumrate_min_all))
 
-    # 新指標 2：真正對應 chance constraint 的檢查
-    # 每條 test channel 的 empirical P(SNR<thr) 是否超過 epsilon=q
-    reg_prob_cc_viol = float(np.mean(reg_snr_vprob_all > OUTAGE_QUANTILE))
-    rob_prob_cc_viol = float(np.mean(rob_snr_vprob_all > OUTAGE_QUANTILE))
+    reg_mean_vprob = float(np.mean(reg_snr_vprob_all))
+    rob_mean_vprob = float(np.mean(rob_snr_vprob_all))
 
     print("====================================================")
     print(f"[Metric A] Mean E[SumRate] (over {N_VAL} injections):")
-    print(f"  REG: {float(np.mean(reg_sumrate_mean_all)):.6f} bits/s/Hz")
-    print(f"  ROB: {float(np.mean(rob_sumrate_mean_all)):.6f} bits/s/Hz")
+    print(f"  REG: {reg_mean_sumrate:.6f} bits/s/Hz")
+    print(f"  ROB: {rob_mean_sumrate:.6f} bits/s/Hz")
 
-    print(f"[Metric B] Mean VaR_{OUTAGE_QUANTILE}(SNR) (linear -> dB):")
-    print(f"  REG: {10.0*np.log10(max(float(np.mean(reg_snr_var_all)), 1e-12)):.3f} dB")
-    print(f"  ROB: {10.0*np.log10(max(float(np.mean(rob_snr_var_all)), 1e-12)):.3f} dB")
+    print(f"[Metric B] Mean min SumRate (over {N_VAL} injections):")
+    print(f"  REG: {reg_min_sumrate:.6f} bits/s/Hz")
+    print(f"  ROB: {rob_min_sumrate:.6f} bits/s/Hz")
 
-    print(f"[Old surrogate] P(VaR_{OUTAGE_QUANTILE}(SNR) < thr={SENSING_SNR_THRESHOLD_dB} dB):")
-    print(f"  REG: {reg_prob_var_viol*100:.2f}%")
-    print(f"  ROB: {rob_prob_var_viol*100:.2f}%")
-
-    print(f"[New metric] Mean empirical P(SNR < thr={SENSING_SNR_THRESHOLD_dB} dB) over {N_VAL} injections:")
-    print(f"  REG: {reg_mean_snr_vprob*100:.2f}%")
-    print(f"  ROB: {rob_mean_snr_vprob*100:.2f}%")
-
-    print(f"[Empirical chance constraint] P( empirical P(SNR < thr) > eps={OUTAGE_QUANTILE:.2f} ):")
-    print(f"  REG: {reg_prob_cc_viol*100:.2f}%")
-    print(f"  ROB: {rob_prob_cc_viol*100:.2f}%")
-
-    print(f"[Objective] Mean objective = E[SumRate] - λ_snr*pen - λ_phi*phi_pen - λ_p*tx_excess:")
-    print(f"  REG: {float(np.mean(reg_obj_all)):.6f}")
-    print(f"  ROB: {float(np.mean(rob_obj_all)):.6f}")
+    print(f"[Metric C] Mean empirical P(SNR < thr={SENSING_SNR_THRESHOLD_dB} dB) (over {N_VAL} injections):")
+    print(f"  REG: {reg_mean_vprob*100:.3f}%")
+    print(f"  ROB: {rob_mean_vprob*100:.3f}%")
     print("====================================================")
 
     # 建資料夾
@@ -397,7 +346,7 @@ if __name__ == "__main__":
     q_pct = int(round(OUTAGE_QUANTILE * 100))
 
     # ----------------------------
-    # 6-1) Plot CDF 1: E[SumRate]
+    # 6-1) CDF of E[SumRate]
     # ----------------------------
     x_sr_reg, y_sr_reg = empirical_cdf(reg_sumrate_mean_all)
     x_sr_rob, y_sr_rob = empirical_cdf(rob_sumrate_mean_all)
@@ -405,9 +354,9 @@ if __name__ == "__main__":
     plt.figure()
     plt.plot(x_sr_reg, y_sr_reg, label="REG: E[SumRate]")
     plt.plot(x_sr_rob, y_sr_rob, label="ROB: E[SumRate]")
-    plt.xlabel("Mean Sum Rate over injections (bits/s/Hz)")
+    plt.xlabel("E[SumRate] over injections (bits/s/Hz)")
     plt.ylabel("CDF  P(X ≤ x)")
-    plt.title(f"Mean Sum Rate over injections — {SETTING_STRING}")
+    plt.title(f"CDF of E[SumRate] — {SETTING_STRING}")
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()
@@ -416,38 +365,17 @@ if __name__ == "__main__":
     plt.close()
 
     # ----------------------------
-    # 6-2) Plot CDF 2: VaR_q(SNR)  (x 軸用 dB)
-    # ----------------------------
-    reg_snr_var_db = 10.0 * np.log10(np.clip(reg_snr_var_all, 1e-12, None))
-    rob_snr_var_db = 10.0 * np.log10(np.clip(rob_snr_var_all, 1e-12, None))
-    x_v_reg, y_v_reg = empirical_cdf(reg_snr_var_db)
-    x_v_rob, y_v_rob = empirical_cdf(rob_snr_var_db)
-
-    plt.figure()
-    plt.plot(x_v_reg, y_v_reg, label=f"REG: VaR_{OUTAGE_QUANTILE}(SNR)")
-    plt.plot(x_v_rob, y_v_rob, label=f"ROB: VaR_{OUTAGE_QUANTILE}(SNR)")
-    plt.xlabel(f"VaR_{OUTAGE_QUANTILE}(SNR) (dB)")
-    plt.ylabel("CDF  P(X ≤ x)")
-    plt.title(f"VaR_{OUTAGE_QUANTILE}(SNR) CDF — {SETTING_STRING}")
-    plt.grid(True, linestyle="--", alpha=0.35)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f"CDF_VaR{q_pct:02d}SNR_{SETTING_STRING}.jpg"), format="jpg")
-    plt.show()
-    plt.close()
-
-    # ----------------------------
-    # 6-3) Plot CDF 3: min SumRate among injections
+    # 6-2) CDF of min SumRate
     # ----------------------------
     x_min_reg, y_min_reg = empirical_cdf(reg_sumrate_min_all)
     x_min_rob, y_min_rob = empirical_cdf(rob_sumrate_min_all)
 
     plt.figure()
-    plt.plot(x_min_reg, y_min_reg, label="REG: min[SumRate]")
-    plt.plot(x_min_rob, y_min_rob, label="ROB: min[SumRate]")
-    plt.xlabel("Min Sum Rate among injections (bits/s/Hz)")
+    plt.plot(x_min_reg, y_min_reg, label="REG: min SumRate")
+    plt.plot(x_min_rob, y_min_rob, label="ROB: min SumRate")
+    plt.xlabel("min SumRate over injections (bits/s/Hz)")
     plt.ylabel("CDF  P(X ≤ x)")
-    plt.title(f"Min Sum Rate among injections — {SETTING_STRING}")
+    plt.title(f"CDF of min SumRate — {SETTING_STRING}")
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()
@@ -455,21 +383,3 @@ if __name__ == "__main__":
     plt.show()
     plt.close()
 
-    # ----------------------------
-    # 6-4) Plot CDF 4: empirical violation probability
-    # ----------------------------
-    x_p_reg, y_p_reg = empirical_cdf(reg_snr_vprob_all * 100.0)
-    x_p_rob, y_p_rob = empirical_cdf(rob_snr_vprob_all * 100.0)
-
-    plt.figure()
-    plt.plot(x_p_reg, y_p_reg, label="REG: empirical violation prob.")
-    plt.plot(x_p_rob, y_p_rob, label="ROB: empirical violation prob.")
-    plt.xlabel(f"Empirical P(SNR < {SENSING_SNR_THRESHOLD_dB} dB) over injections (%)")
-    plt.ylabel("CDF  P(X ≤ x)")
-    plt.title(f"Empirical SNR-threshold violation probability CDF — {SETTING_STRING}")
-    plt.grid(True, linestyle="--", alpha=0.35)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(fig_dir, f"CDF_empiricalViolationProb_{SETTING_STRING}.jpg"), format="jpg")
-    plt.show()
-    plt.close()
