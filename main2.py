@@ -22,21 +22,113 @@ def plot(curve_dir: str):
     reg_curves = np.load(regular_curves_path)  # rows: [train_obj, val_obj, val_sum_rate, val_sense_snr_db]
     rob_curves = np.load(robust_curves_path)
 
+    # ===============================
+    # 取出欄位
+    # ===============================
     reg_train = reg_curves[:, 0]
+    reg_val   = reg_curves[:, 1]
+    reg_val_sum_rate = reg_curves[:, 2]
+    reg_val_snr_db   = reg_curves[:, 3]
+
     rob_train = rob_curves[:, 0]
+    rob_val   = rob_curves[:, 1]
+    rob_val_sum_rate = rob_curves[:, 2]
+    rob_val_snr_db   = rob_curves[:, 3]
+
     x_reg = np.arange(1, len(reg_train) + 1)
     x_rob = np.arange(1, len(rob_train) + 1)
 
+    # ===============================
+    # Generalization gap
+    # objective 越大越好，所以 gap = train - val
+    # gap 越大，通常代表越有過擬合傾向
+    # ===============================
+    reg_gap = reg_train - reg_val
+    rob_gap = rob_train - rob_val
+
+    # 圖片輸出資料夾
+    fig_dir = os.path.join(curve_dir, "plot_figures")
+    os.makedirs(fig_dir, exist_ok=True)
+
+    # ===============================
+    # 1) Regular: Train vs Validation Objective
+    # ===============================
     plt.figure()
-    plt.plot(x_reg, reg_train, label="Regular - TrainObj")
-    plt.plot(x_rob, rob_train, label="Robust  - TrainObj")
+    plt.plot(x_reg, reg_train, label="REG TrainObj")
+    plt.plot(x_reg, reg_val,   label="REG ValObj")
     plt.xlabel("Epoch")
-    plt.ylabel("Training Objective")
-    plt.title(f"Convergence (Train Objective) — {SETTING_STRING}")
+    plt.ylabel("Objective")
+    plt.title(f"REG Train/Validation Objective — {SETTING_STRING}")
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"REG_train_val_obj_{SETTING_STRING}.jpg"), format="jpg")
     plt.show()
+    plt.close()
+
+    # ===============================
+    # 2) Robust: Train vs Validation Objective
+    # ===============================
+    plt.figure()
+    plt.plot(x_rob, rob_train, label="ROB TrainObj")
+    plt.plot(x_rob, rob_val,   label="ROB ValObj")
+    plt.xlabel("Epoch")
+    plt.ylabel("Objective")
+    plt.title(f"ROB Train/Validation Objective — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"ROB_train_val_obj_{SETTING_STRING}.jpg"), format="jpg")
+    plt.show()
+    plt.close()
+
+    # ===============================
+    # 3) Generalization Gap comparison
+    # ===============================
+    plt.figure()
+    plt.plot(x_reg, reg_gap, label="REG Gap = TrainObj - ValObj")
+    plt.plot(x_rob, rob_gap, label="ROB Gap = TrainObj - ValObj")
+    plt.xlabel("Epoch")
+    plt.ylabel("Generalization Gap")
+    plt.title(f"Generalization Gap — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"generalization_gap_{SETTING_STRING}.jpg"), format="jpg")
+    plt.show()
+    plt.close()
+
+    # ===============================
+    # 4) Validation SumRate comparison
+    # ===============================
+    plt.figure()
+    plt.plot(x_reg, reg_val_sum_rate, label="REG Val SumRate")
+    plt.plot(x_rob, rob_val_sum_rate, label="ROB Val SumRate")
+    plt.xlabel("Epoch")
+    plt.ylabel("Validation SumRate (bits/s/Hz)")
+    plt.title(f"Validation SumRate — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"validation_sumrate_{SETTING_STRING}.jpg"), format="jpg")
+    plt.show()
+    plt.close()
+
+    # ===============================
+    # 5) Validation SNR comparison
+    # ===============================
+    plt.figure()
+    plt.plot(x_reg, reg_val_snr_db, label="REG Val SNR (dB)")
+    plt.plot(x_rob, rob_val_snr_db, label="ROB Val SNR (dB)")
+    plt.xlabel("Epoch")
+    plt.ylabel("Validation SNR (dB)")
+    plt.title(f"Validation SNR — {SETTING_STRING}")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(fig_dir, f"validation_snr_{SETTING_STRING}.jpg"), format="jpg")
+    plt.show()
+    plt.close()
 
 
 def np_to_torch_complex(x_np: np.ndarray) -> torch.Tensor:
@@ -76,21 +168,21 @@ def forward_objective(comm_net, sense_net, ris_net,
     sense_snr = comm_net.compute_sense_snr(g_dt, W_S, W_C, pl_BS_TAR_BS)            # (B,)
 
     snr_violation = torch.clamp(SENSING_SNR_THRESHOLD - sense_snr.real, min=0.0)    # (B,) 如果小於門檻就懲罰
-    snr_penalty_mean = snr_violation.mean()                                         # scalar (對batch 取平均) L3
+    snr_penalty_mean = snr_violation.mean()                                          # scalar (對batch 取平均) L3
 
     # 4) φ 懲罰
-    phi_abs = phi.abs()                                                             # (B,N)
-    phi_excess = torch.clamp(phi_abs - 1.0, min=0.0)                                # (B,N)
-    phi_penalty_mean = (phi_excess).mean(dim=1).mean()                              # scalar 對batch 取平均 L1 (可以打開平方懲罰_目前關閉)
+    phi_abs = phi.abs()                                                              # (B,N)
+    phi_excess = torch.clamp(phi_abs - 1.0, min=0.0)                                 # (B,N)
+    phi_penalty_mean = (phi_excess).mean(dim=1).mean()                               # scalar 對batch 取平均 L1 (可以打開平方懲罰_目前關閉)
 
     # 5) TX power 懲罰
-    power_comm  = (W_C.abs() ** 2).sum(dim=(1, 2))                                  # (B,)
-    power_sense = (W_S.abs() ** 2).sum(dim=(1, 2))                                  # (B,)
-    tx_power = power_comm + power_sense                                             # (B,)
-    tx_power_mean = tx_power.mean()                                                 
+    power_comm  = (W_C.abs() ** 2).sum(dim=(1, 2))                                   # (B,)
+    power_sense = (W_S.abs() ** 2).sum(dim=(1, 2))                                   # (B,)
+    tx_power = power_comm + power_sense                                              # (B,)
+    tx_power_mean = tx_power.mean()
 
-    tx_excess = torch.clamp(tx_power - TRANSMIT_POWER_TOTAL, min=0.0)               # (B,)
-    tx_penalty_mean = (tx_excess).mean()                                            # scalar 對batch 取平均 L2 (可以打開平方懲罰_目前關閉)
+    tx_excess = torch.clamp(tx_power - TRANSMIT_POWER_TOTAL, min=0.0)                # (B,)
+    tx_penalty_mean = (tx_excess).mean()                                             # scalar 對batch 取平均 L2 (可以打開平方懲罰_目前關閉)
 
     # 6) objective
     objective = (
@@ -210,7 +302,7 @@ def forward_objective_robust(comm_net, sense_net, ris_net,
     # 2) 機率約束 surrogate：VaR_q(SNR) >= Γ_th
     #    用 kthvalue 取每個 b 的第 k 小 SNR（k = ceil(q*S)）
     k = max(1, int(np.ceil(q * S)))                            # S=1000,q=0.05 -> k=50
-    snr_var, _ = torch.kthvalue(snr_samples, k=k, dim=1)        # (B,) = VaR_q(SNR)
+    snr_var, _ = torch.kthvalue(snr_samples, k=k, dim=1)      # (B,) = VaR_q(SNR)
 
     # hinge penalty：max(Γ_th - VaR, 0)
     snr_violation_var = torch.clamp(SENSING_SNR_THRESHOLD - snr_var, min=0.0)  # (B,)
@@ -374,7 +466,6 @@ if __name__ == "__main__":
     # ===============================
     # --plot 畫出收斂圖
     # ===============================
-
     ckpt_dir  = CKPT_DIR
     curve_dir = CURVE_DIR
 
@@ -389,7 +480,6 @@ if __name__ == "__main__":
     # ===============================
     # 建立 6 個網路（3 regular + 3 robust）與 optimizer
     # ===============================
-
     # --- Regular nets ---
     regular_comm_net   = CommBeamformerNet().to(DEVICE)
     regular_sense_net  = SenseBeamformerNet().to(DEVICE)
@@ -425,23 +515,39 @@ if __name__ == "__main__":
     rob_stopped = False
 
     # 載入固定 Train & validation estimated channels (data_size筆)
-    val_data = np.load(TRAIN_VAL_NPZ_PATH)
+    data = np.load(TRAIN_VAL_NPZ_PATH)
 
-    val_h_dk = np_to_torch_complex(val_data["h_dk"])   
-    val_h_rk = np_to_torch_complex(val_data["h_rk"])   
-    val_G    = np_to_torch_complex(val_data["G"])      
-    val_g_dt = np_to_torch_complex(val_data["g_dt"])   
+    all_h_dk = np_to_torch_complex(data["h_dk"])
+    all_h_rk = np_to_torch_complex(data["h_rk"])
+    all_G    = np_to_torch_complex(data["G"])
+    all_g_dt = np_to_torch_complex(data["g_dt"])
+
+    n_total = all_h_dk.shape[0]
+    assert n_total == DATA_SIZE, f"npz 資料量 {n_total} 與 DATA_SIZE={DATA_SIZE} 不符"
 
     # 先 shuffle 一次，再切 7:3
-    perm = np.random.permutation(DATA_SIZE)
-    n_train = int(0.7 * DATA_SIZE)
-    n_val   = DATA_SIZE - n_train
+    perm = torch.randperm(n_total, device=DEVICE)
+    n_train = int(0.7 * n_total)
+    n_val   = n_total - n_train
 
     train_idx = perm[:n_train]
     val_idx   = perm[n_train:]
 
-    print(f"[INFO] total={DATA_SIZE}, train={n_train}, val={n_val}")
+    print(f"[INFO] total={n_total}, train={n_train}, val={n_val}")
 
+    # train 每個 epoch 需要的資料量
+    required_train_samples = MINIBATCHES * BATCH_SIZE
+    if required_train_samples > n_train:
+        raise ValueError(
+            f"Train split 不足以支撐目前設定："
+            f"MINIBATCHES*BATCH_SIZE = {required_train_samples} > n_train = {n_train}"
+        )
+
+    if BATCH_SIZE > n_val:
+        raise ValueError(
+            f"Val split 不足以抽一個 validation batch："
+            f"BATCH_SIZE = {BATCH_SIZE} > n_val = {n_val}"
+        )
 
     # --- regular ckpt ---
     regular_comm_ckpt_path  = os.path.join(ckpt_dir, f"comm_{SETTING_STRING}.ckpt")
@@ -472,11 +578,15 @@ if __name__ == "__main__":
         regular_comm_net.train(); regular_sense_net.train(); regular_ris_net.train()
         robust_comm_net.train();  robust_sense_net.train();  robust_ris_net.train()
 
-        #每次清空
+        # 每次清空
         reg_obj_ep = 0.0
         rob_obj_ep = 0.0
 
+        # train 每個 epoch 重新 shuffle
+        epoch_perm = torch.randperm(n_train, device=DEVICE)
+
         for num in range(MINIBATCHES):
+            # 一個 MINIBATCHES 有 BATCH_SIZE 個通道 一個MINIBATCHES更新一次權重
             batch_ids = epoch_perm[num * BATCH_SIZE : (num + 1) * BATCH_SIZE]
             idx = train_idx[batch_ids]
 
@@ -512,8 +622,18 @@ if __name__ == "__main__":
         regular_comm_net.eval(); regular_sense_net.eval(); regular_ris_net.eval()
         robust_comm_net.eval();  robust_sense_net.eval();  robust_ris_net.eval()
 
+        # 每個 epoch 從 30% val pool 隨機抽一個 BATCH_SIZE 做驗證
+        val_perm = torch.randperm(n_val, device=DEVICE)
+        val_batch_ids = val_perm[:BATCH_SIZE]
+        idx_val = val_idx[val_batch_ids]
+
+        val_h_dk = all_h_dk[idx_val]
+        val_h_rk = all_h_rk[idx_val]
+        val_G    = all_G[idx_val]
+        val_g_dt = all_g_dt[idx_val]
+
         with torch.no_grad():
-            # 使用固定 validation estimated channels
+            # 使用 validation pool 隨機抽出的 estimated channels
 
             # --- regular val ---
             reg_val_obj_t, reg_val_logs = forward_objective(
@@ -546,7 +666,6 @@ if __name__ == "__main__":
         np.save(robust_curves_path,  np.array(robust_curves,  dtype=np.float32))
 
         # Log：REG/ROB 分兩行顯示
-
         print(
             f"[Epoch {ep:03d}]\n"
             f"  REG | TrainObj: {reg_obj_ep: .4e} | ValObj: {reg_val_obj: .4e} | Val SumRate: {reg_val_sum_rate: .4e} | Val SNR(dB): {reg_val_snr_db: .3f}\n"
@@ -555,7 +674,7 @@ if __name__ == "__main__":
 
         # ---------- SAVE BEST CKPT ----------
         # REG：只存 best ckpt，不做 early stop
-        if reg_val_obj > best_val_regular + REG_EARLY_STOPPING_MIN_DELTA:
+        if reg_val_obj > best_val_regular:
             best_val_regular = reg_val_obj
             torch.save(regular_comm_net.state_dict(),  regular_comm_ckpt_path)
             torch.save(regular_sense_net.state_dict(), regular_sense_ckpt_path)
@@ -578,4 +697,5 @@ if __name__ == "__main__":
                 rob_stopped = True
                 print(f"[EARLY STOP] ROB stopped at epoch {ep}, best ValObj = {best_val_robust:.4e}")
                 break
+
 print("Training Script finished!")

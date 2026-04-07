@@ -187,24 +187,40 @@ def _estimate_single_channel(H: np.ndarray) -> np.ndarray:
     return H_est
 
 if __name__ == "__main__":
-    print("Generating offline test channels...")
-    # 創建4條通道
-    h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(N_TEST)
+    # 固定 validation estimated channels
+    print("Generating offline Training & Validation channels...")
 
-    # 估測4條通道
+    h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(DATA_SIZE)
+
     h_dk_est = _estimate_single_channel(h_dk_np)
     h_rk_est = _estimate_single_channel(h_rk_np)
     G_est    = _estimate_single_channel(G_np)
     g_dt_est = _estimate_single_channel(g_dt_np)
 
-    # save files
-    out_path = TEST_NPZ_PATH
-
     np.savez(
-        out_path,
+        TRAIN_VAL_NPZ_PATH,
         h_dk=h_dk_est,
         h_rk=h_rk_est,
         G=G_est,
         g_dt=g_dt_est
     )
-    print(f"[ISAC] Saved: {out_path}")
+    print(f"[ISAC] Saved validation set: {TRAIN_VAL_NPZ_PATH}")
+
+    # 固定 test estimated channels
+    print("Generating offline test channels...")
+
+    h_dk_np, h_rk_np, G_np, g_dt_np = generate_real_channels(N_TEST)
+
+    h_dk_est = _estimate_single_channel(h_dk_np)
+    h_rk_est = _estimate_single_channel(h_rk_np)
+    G_est    = _estimate_single_channel(G_np)
+    g_dt_est = _estimate_single_channel(g_dt_np)
+
+    np.savez(
+        TEST_NPZ_PATH,
+        h_dk=h_dk_est,
+        h_rk=h_rk_est,
+        G=G_est,
+        g_dt=g_dt_est
+    )
+    print(f"[ISAC] Saved test set: {TEST_NPZ_PATH}")
