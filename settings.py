@@ -84,7 +84,7 @@ OUTAGE_QUANTILE     = 0.05      # γ：用 5% 分位做健壯化目標（Robust_
 # ================================
 # 訓練/驗證/測試
 # ================================
-EPOCHS          = 500        # 訓練輪數 一個epoch=MINIBATCHES*BATCH_SIZE 次
+EPOCHS          = 100        # 訓練輪數 一個epoch=MINIBATCHES*BATCH_SIZE 次
 MINIBATCHES     = 50        # 每個epoch 有多少 mini-batch   
 BATCH_SIZE      = 1000      # 每個 mini-batch 大小  
 DATA_SIZE       = 200000    # 訓練與VAL使用總資料
