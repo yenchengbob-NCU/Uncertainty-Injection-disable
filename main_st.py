@@ -9,13 +9,19 @@ from tqdm import trange
 from settings import *
 from neural_net import LongTermPositionNet, ShortTermCommNet, ShortTermRadarNet
 
+# ================================
+# Short-term validation 設定
+# ================================
+ST_VAL_LAYOUTS_PER_EPOCH = 50                  # 每個 epoch 從 validation pool 抽幾個 layouts
+ST_VAL_CHANNELS_PER_LAYOUT = 1000              # 每個 validation layout 抽幾組 estimated channels
+
 # robust injection 分塊，避免顯存爆
 INJECTION_CHUNK = 50
 
 
-# ============================================================
+# ================================
 # Helpers
-# ============================================================
+# ================================
 def np_to_torch_complex(x_np: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(x_np).to(torch.complex64).to(DEVICE)
 
@@ -74,10 +80,6 @@ def load_shortterm_dataset(npz_path: str, split_name: str):
     return dataset
 
 
-def sample_layout_id(n_layouts: int) -> int:
-    return int(np.random.randint(0, n_layouts))
-
-
 def sample_channel_ids(n_pool: int, batch_size: int) -> np.ndarray:
     replace = n_pool < batch_size
     return np.random.choice(n_pool, size=batch_size, replace=replace)
@@ -123,20 +125,26 @@ def extract_shortterm_batch(dataset, layout_id: int, channel_ids: np.ndarray):
     }
 
 
-# ============================================================
+# ================================
 # Short-term regular objective
-# ============================================================
+# ================================
 def forward_shortterm_regular_objective(
     comm_net: ShortTermCommNet,
     radar_net: ShortTermRadarNet,
-    theta_fixed: torch.Tensor,      # (1,N)
+    theta_fixed: torch.Tensor,
     batch_data: dict,
 ):
     """
-    regular short-term:
-        fixed theta_LT
-        estimated channels -> W_C, W_R
-        objective = mean sum-rate - sensing penalty - tx penalty
+    計算 regular short-term objective。
+
+    流程:
+        1. fixed theta_LT
+        2. estimated channels -> W_C, W_R
+        3. 在 estimated channels 上計算 sum-rate、sensing penalty、tx penalty
+
+    回傳:
+        objective : torch.Tensor
+        logs      : dict
     """
     h_dk_hat = batch_data["h_dk_hat"]
     h_rk_hat = batch_data["h_rk_hat"]
@@ -148,13 +156,11 @@ def forward_shortterm_regular_objective(
     pl_BS_TAR_BS = batch_data["pl_BS_TAR_BS"]
 
     B = h_dk_hat.shape[0]
-    theta_batch = theta_fixed.expand(B, RIS_UNIT)
+    theta_batch = theta_fixed.expand(B, RIS_UNIT)                                      # shape = (B,N)
 
-    # design variables from estimated channels
-    W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)
-    W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)
+    W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                   # shape = (B,M,K)
+    W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                  # shape = (B,M,RADAR_STREAMS)
 
-    # communication objective on estimated channels
     sumrate_mean = comm_net.compute_sum_rate(
         h_dk=h_dk_hat,
         h_rk=h_rk_hat,
@@ -166,18 +172,24 @@ def forward_shortterm_regular_objective(
         pl_BS_RIS_UE=pl_BS_RIS_UE,
     ).mean()
 
-    # sensing penalty on estimated channels
     sense_snr = comm_net.compute_sense_snr(
         g_dt=g_dt_hat,
         W_R=W_R,
         W_C=W_C,
         pl_BS_TAR_BS=pl_BS_TAR_BS
     ).real
-    snr_penalty = torch.clamp(SENSING_SNR_THRESHOLD - sense_snr, min=0.0).mean()
 
-    # tx penalty
+    snr_penalty = torch.clamp(
+        SENSING_SNR_THRESHOLD - sense_snr,
+        min=0.0
+    ).mean()
+
     tx_power = comm_net.compute_tx_power(W_C, W_R)
-    tx_penalty = torch.clamp(tx_power - TRANSMIT_POWER_TOTAL, min=0.0).mean()
+
+    tx_penalty = torch.clamp(
+        tx_power - TRANSMIT_POWER_TOTAL,
+        min=0.0
+    ).mean()
 
     objective = (
         sumrate_mean
@@ -192,26 +204,33 @@ def forward_shortterm_regular_objective(
         "tx_penalty_mean": tx_penalty.detach(),
         "objective": objective.detach(),
     }
+
     return objective, logs
 
 
-# ============================================================
+# ================================
 # Short-term robust objective
-# ============================================================
+# ================================
 def forward_shortterm_robust_objective(
     comm_net: ShortTermCommNet,
     radar_net: ShortTermRadarNet,
-    theta_fixed: torch.Tensor,      # (1,N)
+    theta_fixed: torch.Tensor,
     batch_data: dict,
     injection_samples: int,
 ):
     """
-    robust short-term:
-        1. NN輸入仍然是 estimated channels + fixed theta_LT
-        2. 先用原始 estimated channels 產生 W_C, W_R
-        3. 再把 estimated channels 複製 L 次並注入不確定性
-        4. 在 injected channels 上計算 robust objective
+    計算 robust short-term objective。
+    流程:
+        1. NN 輸入使用原始 estimated channels + fixed theta_LT
+        2. 用原始 estimated channels 產生 W_C, W_R
+        3. 複製 estimated channels 並加入 uncertainty injection
+        4. 在 injected channels 上計算 mean sum-rate 與 VaR-SNR penalty
+
+    回傳:
+        objective : torch.Tensor
+        logs      : dict
     """
+
     h_dk_hat = batch_data["h_dk_hat"]
     h_rk_hat = batch_data["h_rk_hat"]
     G_hat    = batch_data["G_hat"]
@@ -225,45 +244,40 @@ def forward_shortterm_robust_objective(
     N = h_rk_hat.shape[1]
     L = int(injection_samples)
 
-    theta_batch = theta_fixed.expand(B, RIS_UNIT)
+    theta_batch = theta_fixed.expand(B, RIS_UNIT)                                      # shape = (B,N)
 
-    # --------------------------------------------------------
-    # (A) design variables from ORIGINAL estimated channels
-    # --------------------------------------------------------
-    W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)
-    W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)
+    W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                   # shape = (B,M,K)
+    W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                  # shape = (B,M,RADAR_STREAMS)
 
     tx_power = comm_net.compute_tx_power(W_C, W_R)
-    tx_penalty = torch.clamp(tx_power - TRANSMIT_POWER_TOTAL, min=0.0).mean()
 
-    # --------------------------------------------------------
-    # (B) uncertainty injection only in performance calculation
-    # --------------------------------------------------------
+    tx_penalty = torch.clamp(
+        tx_power - TRANSMIT_POWER_TOTAL,
+        min=0.0
+    ).mean()
+
     sumrate_chunks = []
     snr_chunks = []
 
     for s0 in range(0, L, INJECTION_CHUNK):
         s = min(INJECTION_CHUNK, L - s0)
 
-        # replicate estimated channels: (B,s,...) -> (B*s,...)
         h_dk_rep = h_dk_hat.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
         h_rk_rep = h_rk_hat.unsqueeze(1).expand(B, s, N, K).reshape(B * s, N, K)
         G_rep    = G_hat.unsqueeze(1).expand(B, s, N, M).reshape(B * s, N, M)
         g_dt_rep = g_dt_hat.unsqueeze(1).expand(B, s, M, 1).reshape(B * s, M, 1)
 
-        # injected estimated channels
         h_dk_inj = h_dk_rep + complex_awgn(h_dk_rep.shape, INJECTION_VARIANCE, DEVICE, h_dk_rep.dtype)
         h_rk_inj = h_rk_rep + complex_awgn(h_rk_rep.shape, INJECTION_VARIANCE, DEVICE, h_rk_rep.dtype)
         G_inj    = G_rep    + complex_awgn(G_rep.shape,    INJECTION_VARIANCE, DEVICE, G_rep.dtype)
         g_dt_inj = g_dt_rep + complex_awgn(g_dt_rep.shape, INJECTION_VARIANCE, DEVICE, g_dt_rep.dtype)
 
-        # replicate design vars
         theta_rep = theta_batch.unsqueeze(1).expand(B, s, N).reshape(B * s, N)
-        W_C_rep   = W_C.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
-        L_R = W_R.shape[2]
-        W_R_rep = W_R.unsqueeze(1).expand(B, s, M, L_R).reshape(B * s, M, L_R)
+        W_C_rep = W_C.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
 
-        # sum-rate on injected channels
+        radar_streams = W_R.shape[2]                                                   # sensing streams 數量
+        W_R_rep = W_R.unsqueeze(1).expand(B, s, M, radar_streams).reshape(B * s, M, radar_streams)
+
         sinrs = comm_net.compute_comm_sinrs(
             h_dk=h_dk_inj,
             h_rk=h_rk_inj,
@@ -274,34 +288,34 @@ def forward_shortterm_robust_objective(
             pl_BS_UE=pl_BS_UE,
             pl_BS_RIS_UE=pl_BS_RIS_UE,
         )
-        rates = comm_net.compute_rates(sinrs)
-        sum_rate = rates.sum(dim=1)
 
-        # sensing SNR on injected channels
+        rates = comm_net.compute_rates(sinrs)
+        sum_rate = rates.sum(dim=1)                                                     # shape = (B*s,)
+
         sense_snr = comm_net.compute_sense_snr(
             g_dt=g_dt_inj,
             W_R=W_R_rep,
             W_C=W_C_rep,
             pl_BS_TAR_BS=pl_BS_TAR_BS,
-        ).real
+        ).real                                                                          # shape = (B*s,)
 
         sumrate_chunks.append(sum_rate.reshape(B, s))
         snr_chunks.append(sense_snr.reshape(B, s))
 
-    sumrate_samples = torch.cat(sumrate_chunks, dim=1)   # (B,L)
-    snr_samples     = torch.cat(snr_chunks, dim=1)       # (B,L)
+    sumrate_samples = torch.cat(sumrate_chunks, dim=1)                                  # shape = (B,L)
+    snr_samples = torch.cat(snr_chunks, dim=1)                                          # shape = (B,L)
 
-    # --------------------------------------------------------
-    # (C) robust aggregation
-    # --------------------------------------------------------
-    sumrate_mean_per_sample = sumrate_samples.mean(dim=1)    # (B,)
+    sumrate_mean_per_sample = sumrate_samples.mean(dim=1)                               # shape = (B,)
     sumrate_mean = sumrate_mean_per_sample.mean()
 
     q = float(OUTAGE_QUANTILE)
     k = max(1, int(np.ceil(q * L)))
-    snr_var = torch.kthvalue(snr_samples, k=k, dim=1).values  # (B,)
+    snr_var = torch.kthvalue(snr_samples, k=k, dim=1).values                            # shape = (B,)
 
-    snr_penalty = torch.clamp(SENSING_SNR_THRESHOLD - snr_var, min=0.0).mean()
+    snr_penalty = torch.clamp(
+        SENSING_SNR_THRESHOLD - snr_var,
+        min=0.0
+    ).mean()
 
     objective = (
         sumrate_mean
@@ -316,36 +330,51 @@ def forward_shortterm_robust_objective(
         "tx_penalty_mean": tx_penalty.detach(),
         "objective": objective.detach(),
     }
+
     return objective, logs
 
 
-# ============================================================
-# Validation
-# ============================================================
+# ================================
+# Short-term validation
+# ================================
 @torch.no_grad()
-def validate_shortterm_regular_all(
+def validate_shortterm_regular_sampled(
     longterm_net: LongTermPositionNet,
     comm_net: ShortTermCommNet,
     radar_net: ShortTermRadarNet,
     val_dataset,
+    num_val_layouts: int,
+    channels_per_layout: int,
 ):
+    """
+    從 validation pool 抽樣 layouts，計算 regular short-term validation objective。
+
+    回傳:
+        logs : dict
+    """
     longterm_net.eval()
     comm_net.eval()
     radar_net.eval()
 
-    n_val_layouts = val_dataset["ue_layouts"].shape[0]
+    n_val_pool = val_dataset["ue_layouts"].shape[0]
+    num_val_layouts = min(num_val_layouts, n_val_pool)
+
+    replace = n_val_pool < num_val_layouts
+    layout_ids = np.random.choice(n_val_pool, size=num_val_layouts, replace=replace)
 
     total_obj = 0.0
     total_sumrate = 0.0
     total_snr_db = 0.0
 
-    for layout_id in range(n_val_layouts):
+    for layout_id in layout_ids:
+        layout_id = int(layout_id)
+
         ue_layout = val_dataset["ue_layouts"][layout_id]
         theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
 
-        # 使用該 layout 底下全部 val estimated channels
         n_pool = val_dataset["st_h_dk_hat"][layout_id].shape[0]
-        channel_ids = np.arange(n_pool)
+        num_channels = min(channels_per_layout, n_pool)
+        channel_ids = sample_channel_ids(n_pool, num_channels)
 
         batch_data = extract_shortterm_batch(val_dataset, layout_id, channel_ids)
 
@@ -361,36 +390,51 @@ def validate_shortterm_regular_all(
         total_snr_db += float(logs["sense_snr_mean_db"].cpu())
 
     return {
-        "objective": total_obj / n_val_layouts,
-        "sum_rate_mean": total_sumrate / n_val_layouts,
-        "sense_snr_mean_db": total_snr_db / n_val_layouts,
+        "objective": total_obj / num_val_layouts,
+        "sum_rate_mean": total_sumrate / num_val_layouts,
+        "sense_snr_mean_db": total_snr_db / num_val_layouts,
+        "num_val_layouts": num_val_layouts,
+        "channels_per_layout": channels_per_layout,
     }
 
-
 @torch.no_grad()
-def validate_shortterm_robust_all(
+def validate_shortterm_robust_sampled(
     longterm_net: LongTermPositionNet,
     comm_net: ShortTermCommNet,
     radar_net: ShortTermRadarNet,
     val_dataset,
+    num_val_layouts: int,
+    channels_per_layout: int,
 ):
+    """
+    從 validation pool 抽樣 layouts，計算 robust short-term validation objective。
+
+    回傳:
+        logs : dict
+    """
     longterm_net.eval()
     comm_net.eval()
     radar_net.eval()
 
-    n_val_layouts = val_dataset["ue_layouts"].shape[0]
+    n_val_pool = val_dataset["ue_layouts"].shape[0]
+    num_val_layouts = min(num_val_layouts, n_val_pool)
+
+    replace = n_val_pool < num_val_layouts
+    layout_ids = np.random.choice(n_val_pool, size=num_val_layouts, replace=replace)
 
     total_obj = 0.0
     total_sumrate = 0.0
     total_snr_db = 0.0
 
-    for layout_id in range(n_val_layouts):
+    for layout_id in layout_ids:
+        layout_id = int(layout_id)
+
         ue_layout = val_dataset["ue_layouts"][layout_id]
         theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
 
-        # 使用該 layout 底下全部 val estimated channels
         n_pool = val_dataset["st_h_dk_hat"][layout_id].shape[0]
-        channel_ids = np.arange(n_pool)
+        num_channels = min(channels_per_layout, n_pool)
+        channel_ids = sample_channel_ids(n_pool, num_channels)
 
         batch_data = extract_shortterm_batch(val_dataset, layout_id, channel_ids)
 
@@ -407,16 +451,19 @@ def validate_shortterm_robust_all(
         total_snr_db += float(logs["sense_var_snr_mean_db"].cpu())
 
     return {
-        "objective": total_obj / n_val_layouts,
-        "sum_rate_mean": total_sumrate / n_val_layouts,
-        "sense_var_snr_mean_db": total_snr_db / n_val_layouts,
+        "objective": total_obj / num_val_layouts,
+        "sum_rate_mean": total_sumrate / num_val_layouts,
+        "sense_var_snr_mean_db": total_snr_db / num_val_layouts,
+        "num_val_layouts": num_val_layouts,
+        "channels_per_layout": channels_per_layout,
     }
 
 
-# ============================================================
+# ================================
 # Train regular
-# ============================================================
+# ================================
 def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, val_dataset):
+
     optimizer = optim.Adam(
         list(comm_net.parameters()) + list(radar_net.parameters()),
         lr=LEARNING_RATE
@@ -442,8 +489,8 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
         train_snr_db_ep = 0.0
 
         for _ in range(MINIBATCHES):
-            # 1 個 minibatch：抽 1 個 layout，再抽 BATCH_SIZE estimated channels
-            layout_id = sample_layout_id(n_train_layouts)
+            layout_id = int(np.random.randint(0, n_train_layouts))                    # 每次 update 抽 1 個 layout
+
             ue_layout = train_dataset["ue_layouts"][layout_id]
             theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
 
@@ -461,18 +508,21 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
                 batch_data=batch_data,
             )
 
-            (-obj).backward()
+            loss = -obj
+            loss.backward()
             optimizer.step()
 
             train_obj_ep += float(obj.detach().cpu()) / MINIBATCHES
             train_sumrate_ep += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
             train_snr_db_ep += float(logs["sense_snr_mean_db"].cpu()) / MINIBATCHES
 
-        val_logs = validate_shortterm_regular_all(
+        val_logs = validate_shortterm_regular_sampled(
             longterm_net=longterm_net,
             comm_net=comm_net,
             radar_net=radar_net,
             val_dataset=val_dataset,
+            num_val_layouts=ST_VAL_LAYOUTS_PER_EPOCH,
+            channels_per_layout=ST_VAL_CHANNELS_PER_LAYOUT,
         )
 
         curves.append([
@@ -483,13 +533,15 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
             train_snr_db_ep,
             val_logs["sense_snr_mean_db"],
         ])
+
         np.save(curve_path, np.array(curves, dtype=np.float32))
 
         print(
             f"[Short-Reg Epoch {ep:03d}] "
             f"TrainObj={train_obj_ep:.4e} | ValObj={val_logs['objective']:.4e} | "
             f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_logs['sum_rate_mean']:.4e} | "
-            f"TrainSNR(dB)={train_snr_db_ep:.3f} | ValSNR(dB)={val_logs['sense_snr_mean_db']:.3f}"
+            f"TrainSNR(dB)={train_snr_db_ep:.3f} | ValSNR(dB)={val_logs['sense_snr_mean_db']:.3f} | "
+            f"ValLayouts={val_logs['num_val_layouts']} | ValChannels={val_logs['channels_per_layout']}"
         )
 
         if val_logs["objective"] > best_val_obj:
@@ -502,10 +554,13 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
     radar_net.load_model(verbose=True)
 
 
-# ============================================================
+# ================================
 # Train robust
-# ============================================================
+# ================================
 def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val_dataset):
+    """
+    訓練 short-term robust networks。
+    """
     optimizer = optim.Adam(
         list(comm_net.parameters()) + list(radar_net.parameters()),
         lr=LEARNING_RATE
@@ -531,8 +586,8 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
         train_snr_db_ep = 0.0
 
         for _ in range(MINIBATCHES):
-            # 1 個 minibatch：抽 1 個 layout，再抽 BATCH_SIZE estimated channels
-            layout_id = sample_layout_id(n_train_layouts)
+            layout_id = int(np.random.randint(0, n_train_layouts))                    # 每次 update 抽 1 個 layout
+
             ue_layout = train_dataset["ue_layouts"][layout_id]
             theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
 
@@ -551,18 +606,21 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
                 injection_samples=INJECTION_SAMPLES,
             )
 
-            (-obj).backward()
+            loss = -obj
+            loss.backward()
             optimizer.step()
 
             train_obj_ep += float(obj.detach().cpu()) / MINIBATCHES
             train_sumrate_ep += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
             train_snr_db_ep += float(logs["sense_var_snr_mean_db"].cpu()) / MINIBATCHES
 
-        val_logs = validate_shortterm_robust_all(
+        val_logs = validate_shortterm_robust_sampled(
             longterm_net=longterm_net,
             comm_net=comm_net,
             radar_net=radar_net,
             val_dataset=val_dataset,
+            num_val_layouts=ST_VAL_LAYOUTS_PER_EPOCH,
+            channels_per_layout=ST_VAL_CHANNELS_PER_LAYOUT,
         )
 
         curves.append([
@@ -573,13 +631,15 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
             train_snr_db_ep,
             val_logs["sense_var_snr_mean_db"],
         ])
+
         np.save(curve_path, np.array(curves, dtype=np.float32))
 
         print(
             f"[Short-Rob Epoch {ep:03d}] "
             f"TrainObj={train_obj_ep:.4e} | ValObj={val_logs['objective']:.4e} | "
             f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_logs['sum_rate_mean']:.4e} | "
-            f"TrainVaR-SNR(dB)={train_snr_db_ep:.3f} | ValVaR-SNR(dB)={val_logs['sense_var_snr_mean_db']:.3f}"
+            f"TrainVaR-SNR(dB)={train_snr_db_ep:.3f} | ValVaR-SNR(dB)={val_logs['sense_var_snr_mean_db']:.3f} | "
+            f"ValLayouts={val_logs['num_val_layouts']} | ValChannels={val_logs['channels_per_layout']}"
         )
 
         if val_logs["objective"] > best_val_obj:
@@ -592,27 +652,25 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
     radar_net.load_model(verbose=True)
 
 
-# ============================================================
+# ================================
 # Main
-# ============================================================
+# ================================
 if __name__ == "__main__":
-    print("[INFO] 載入固定 nested datasets ...")
+    print("[INFO] 載入固定 datasets ...")
 
     train_dataset = load_shortterm_dataset(TRAIN_DATASET_PATH, "train")
     val_dataset   = load_shortterm_dataset(VAL_DATASET_PATH, "val")
 
-    # 載入 long-term best ckpt，提供 fixed theta_LT
     longterm_net = LongTermPositionNet(ckpt_kind="longterm").to(DEVICE)
+
     if not longterm_net.model_path or not os.path.exists(longterm_net.model_path):
         raise FileNotFoundError(
             "找不到 long-term checkpoint。\n"
             "請先執行 main_lt.py 訓練 long-term 網路。"
         )
+
     longterm_net.load_model(verbose=True)
 
-    # ========================================================
-    # 1) train short-term regular
-    # ========================================================
     short_comm_reg = ShortTermCommNet(ckpt_kind="short_comm").to(DEVICE)
     short_radar_reg = ShortTermRadarNet(ckpt_kind="short_radar").to(DEVICE)
 
@@ -625,9 +683,6 @@ if __name__ == "__main__":
         val_dataset=val_dataset,
     )
 
-    # ========================================================
-    # 2) train short-term robust
-    # ========================================================
     short_comm_rob = ShortTermCommNet(ckpt_kind="short_comm_robust").to(DEVICE)
     short_radar_rob = ShortTermRadarNet(ckpt_kind="short_radar_robust").to(DEVICE)
 

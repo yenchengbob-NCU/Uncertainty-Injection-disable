@@ -3,16 +3,6 @@ import math
 import numpy as np
 from settings import *
 
-# ============================================================
-# Rician / Rayleigh channel model
-# 給定 ue_layout，生成：
-# 1. 幾何資訊
-# 2. large-scale fading
-# 3. true channels (給 long-term 用)
-# 4. estimated channels (給 short-term 用)
-# 5. train / val / test 固定 dataset
-# ============================================================
-
 RICIAN_KAPPA = 2.0   # 線性尺度
 
 # ============================================================
@@ -20,10 +10,9 @@ RICIAN_KAPPA = 2.0   # 線性尺度
 # ============================================================
 def normalize_ue_layout(ue_layout):
     """
-    輸入：
-        ue_layout: [(x1,y1), (x2,y2)] 或 np.ndarray shape=(K,2)
-    回傳：
-        np.ndarray, shape=(UAV_COMM, 2)
+    將 UE layout 轉成 np.ndarray,並檢查 shape 是否為 (UAV_COMM, 2)
+    輸入: ue_layout: [(x1,y1), (x2,y2)] 或 np.ndarray shape=(K,2)
+    回傳: np.ndarray, shape=(UAV_COMM, 2)
     """
     ue_layout = np.asarray(ue_layout, dtype=np.float32)
     if ue_layout.shape != (UAV_COMM, 2):
@@ -122,9 +111,9 @@ def two_way_fading(d1, d2):
     d2 = np.maximum(d2, 1e-12)
     return ((LAMBDA ** 2) / (((4.0 * np.pi) ** 3) * (d1 ** 2) * (d2 ** 2))).astype(np.float32)
 
-# ============================================================
+# ================================
 # 幾何相關量：由指定 layout 計算
-# ============================================================
+# ================================
 
 def geometry_from_layout(ue_layout):
     """
@@ -171,9 +160,9 @@ def geometry_from_layout(ue_layout):
         "d_BS_TAR": d_BS_TAR,
     }
 
-# ============================================================
+# ================================
 # Large-scale fading
-# ============================================================
+# ================================
 
 def large_scale_fading(ue_layout):
     """
@@ -185,16 +174,16 @@ def large_scale_fading(ue_layout):
     geo = geometry_from_layout(ue_layout)
 
     pl_BS_UE = one_way_fading(geo["d_BS_UE"])                           # (K,)
-    pl_BS_RIS_UE = two_way_fading(geo["d_BS_RIS"], geo["d_RIS_UE"])    # (K,)
+    pl_BS_RIS_UE = two_way_fading(geo["d_BS_RIS"], geo["d_RIS_UE"])     # (K,)
     pl_BS_TAR_BS = np.float32(two_way_fading(geo["d_BS_TAR"], geo["d_BS_TAR"]))
 
     return pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS
 
 
-# ============================================================
+# ================================
 # 真實通道生成（條件於給定 layout）
 # raw channels 不含 large-scale fading
-# ============================================================
+# ================================
 def generate_real_channels(n_networks, ue_layout):
     geo = geometry_from_layout(ue_layout)
 
@@ -230,9 +219,9 @@ def generate_real_channels(n_networks, ue_layout):
 
     return h_dk_all, h_rk_all, G_all, g_dt_all
 
-# ============================================================
+# ================================
 # Pilot-based channel estimation
-# ============================================================
+# ================================
 def estimate_single_channel(H):
     """
     LMMSE pilot-aided estimate for:
@@ -258,134 +247,140 @@ def estimate_channels(h_dk, h_rk, G, g_dt):
     g_dt_hat = estimate_single_channel(g_dt)
     return h_dk_hat, h_rk_hat, G_hat, g_dt_hat
 
-
-def generate_estimated_channels(n_networks, ue_layout):
-    h_dk, h_rk, G, g_dt = generate_real_channels(n_networks, ue_layout)
-    return estimate_channels(h_dk, h_rk, G, g_dt)
-
-
-# ============================================================
-# 固定 dataset 生成
-# ============================================================
-def build_split_dataset(split_layouts, n_lt_true, n_st_est, split_name="train"):
+# ================================
+# Dataset 生成
+# ================================
+def build_dataset(layouts, n_lt_true, n_st_est, dataset_name):
     """
-    對某個 split 的所有 layouts 生成固定 dataset
+    根據輸入 layouts 生成固定 dataset。
 
-    回傳 dict 內含：
-    1. ue_layouts / pathloss
-    2. long-term 用 true channels
-    3. short-term 用 estimated channels
+    回傳:
+        dataset : dict
     """
-    n_layouts = len(split_layouts)
+    n_layouts = len(layouts)
     M, N, K = TX_ANT, RIS_UNIT, UAV_COMM
 
-    # ---------- layout-level metadata ----------
-    ue_layouts_arr = np.zeros((n_layouts, K, 2), dtype=np.float32)
-    pl_BS_UE_all = np.zeros((n_layouts, K), dtype=np.float32)
-    pl_BS_RIS_UE_all = np.zeros((n_layouts, K), dtype=np.float32)
-    pl_BS_TAR_BS_all = np.zeros((n_layouts,), dtype=np.float32)
+    ue_layouts_arr = np.zeros((n_layouts, K, 2), dtype=np.float32)                   # UE layout 座標
+    pl_BS_UE_all = np.zeros((n_layouts, K), dtype=np.float32)                        # BS-to-UE path loss
+    pl_BS_RIS_UE_all = np.zeros((n_layouts, K), dtype=np.float32)                    # BS-RIS-UE path loss
+    pl_BS_TAR_BS_all = np.zeros((n_layouts,), dtype=np.float32)                      # BS-target-BS path loss
 
-    # ---------- long-term true channels ----------
-    lt_h_dk_true_all = np.zeros((n_layouts, n_lt_true, M, K), dtype=np.complex64)
-    lt_h_rk_true_all = np.zeros((n_layouts, n_lt_true, N, K), dtype=np.complex64)
-    lt_G_true_all    = np.zeros((n_layouts, n_lt_true, N, M), dtype=np.complex64)
-    lt_g_dt_true_all = np.zeros((n_layouts, n_lt_true, M, 1), dtype=np.complex64)
+    lt_h_dk_true_all = np.zeros((n_layouts, n_lt_true, M, K), dtype=np.complex64)     # LT true h_dk
+    lt_h_rk_true_all = np.zeros((n_layouts, n_lt_true, N, K), dtype=np.complex64)     # LT true h_rk
+    lt_G_true_all = np.zeros((n_layouts, n_lt_true, N, M), dtype=np.complex64)        # LT true G
+    lt_g_dt_true_all = np.zeros((n_layouts, n_lt_true, M, 1), dtype=np.complex64)     # LT true g_dt
 
-    # ---------- short-term estimated channels ----------
-    st_h_dk_hat_all = np.zeros((n_layouts, n_st_est, M, K), dtype=np.complex64)
-    st_h_rk_hat_all = np.zeros((n_layouts, n_st_est, N, K), dtype=np.complex64)
-    st_G_hat_all    = np.zeros((n_layouts, n_st_est, N, M), dtype=np.complex64)
-    st_g_dt_hat_all = np.zeros((n_layouts, n_st_est, M, 1), dtype=np.complex64)
+    st_h_dk_hat_all = np.zeros((n_layouts, n_st_est, M, K), dtype=np.complex64)       # ST estimated h_dk
+    st_h_rk_hat_all = np.zeros((n_layouts, n_st_est, N, K), dtype=np.complex64)       # ST estimated h_rk
+    st_G_hat_all = np.zeros((n_layouts, n_st_est, N, M), dtype=np.complex64)          # ST estimated G
+    st_g_dt_hat_all = np.zeros((n_layouts, n_st_est, M, 1), dtype=np.complex64)       # ST estimated g_dt
 
-    print(f"[{split_name}] 開始生成 dataset，共 {n_layouts} 個 layouts ...")
+    print(f"[{dataset_name}] 開始生成 dataset，共 {n_layouts} 個 layouts ...")
 
-    for idx, layout in enumerate(split_layouts):
-        ue_layout = normalize_ue_layout(layout)
+    for idx, layout in enumerate(layouts):
+        ue_layout = normalize_ue_layout(layout)                                      # shape = (K,2)
 
-        # layout-level metadata
-        pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS = large_scale_fading(ue_layout)
+        pl_BS_UE, pl_BS_RIS_UE, pl_BS_TAR_BS = large_scale_fading(ue_layout)         # layout-level PL
 
-        ue_layouts_arr[idx]   = ue_layout
-        pl_BS_UE_all[idx]     = pl_BS_UE
+        ue_layouts_arr[idx] = ue_layout
+        pl_BS_UE_all[idx] = pl_BS_UE
         pl_BS_RIS_UE_all[idx] = pl_BS_RIS_UE
         pl_BS_TAR_BS_all[idx] = pl_BS_TAR_BS
 
-        # long-term true channels
-        lt_h_dk_true, lt_h_rk_true, lt_G_true, lt_g_dt_true = generate_real_channels(n_lt_true, ue_layout)
+        lt_h_dk_true, lt_h_rk_true, lt_G_true, lt_g_dt_true = generate_real_channels(
+            n_lt_true,
+            ue_layout
+        )                                                                            # LT statistical channels
+
         lt_h_dk_true_all[idx] = lt_h_dk_true
         lt_h_rk_true_all[idx] = lt_h_rk_true
-        lt_G_true_all[idx]    = lt_G_true
+        lt_G_true_all[idx] = lt_G_true
         lt_g_dt_true_all[idx] = lt_g_dt_true
 
-        # short-term estimated channels
-        st_h_dk_true, st_h_rk_true, st_G_true, st_g_dt_true = generate_real_channels(n_st_est, ue_layout)
+        st_h_dk_true, st_h_rk_true, st_G_true, st_g_dt_true = generate_real_channels(
+            n_st_est,
+            ue_layout
+        )                                                                            # ST true channels before estimation
+
         st_h_dk_hat, st_h_rk_hat, st_G_hat, st_g_dt_hat = estimate_channels(
-            st_h_dk_true, st_h_rk_true, st_G_true, st_g_dt_true
-        )
+            st_h_dk_true,
+            st_h_rk_true,
+            st_G_true,
+            st_g_dt_true
+        )                                                                            # ST estimated channels
 
         st_h_dk_hat_all[idx] = st_h_dk_hat
         st_h_rk_hat_all[idx] = st_h_rk_hat
-        st_G_hat_all[idx]    = st_G_hat
+        st_G_hat_all[idx] = st_G_hat
         st_g_dt_hat_all[idx] = st_g_dt_hat
 
         if (idx + 1) % max(1, n_layouts // 10) == 0 or (idx + 1) == n_layouts:
-            print(f"[{split_name}] progress: {idx + 1}/{n_layouts}")
+            print(f"[{dataset_name}] progress: {idx + 1}/{n_layouts}")
 
     dataset = {
-        # metadata
         "ue_layouts": ue_layouts_arr,
         "pl_BS_UE": pl_BS_UE_all,
         "pl_BS_RIS_UE": pl_BS_RIS_UE_all,
         "pl_BS_TAR_BS": pl_BS_TAR_BS_all,
-
-        # long-term true channels
         "lt_h_dk_true": lt_h_dk_true_all,
         "lt_h_rk_true": lt_h_rk_true_all,
         "lt_G_true": lt_G_true_all,
         "lt_g_dt_true": lt_g_dt_true_all,
-
-        # short-term estimated channels
         "st_h_dk_hat": st_h_dk_hat_all,
         "st_h_rk_hat": st_h_rk_hat_all,
         "st_G_hat": st_G_hat_all,
         "st_g_dt_hat": st_g_dt_hat_all,
     }
+
     return dataset
 
 
-def save_split_dataset(dataset, save_path, split_name="train"):
+def save_dataset(dataset, save_path, dataset_name):
+    """
+    將 dataset 儲存成 .npz 檔案。
+    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     np.savez_compressed(save_path, **dataset)
-    print(f"[{split_name}] dataset 已儲存到：{save_path}")
-
-
-def build_and_save_all_datasets():
-    train_dataset = build_split_dataset(
-        split_layouts=TRAIN_UE_LAYOUTS,
-        n_lt_true=LONGTERM_TRUE_SAMPLES_PER_LAYOUT,
-        n_st_est=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
-        split_name="train"
-    )
-    save_split_dataset(train_dataset, TRAIN_DATASET_PATH, "train")
-
-    val_dataset = build_split_dataset(
-        split_layouts=VAL_UE_LAYOUTS,
-        n_lt_true=LONGTERM_TRUE_SAMPLES_PER_LAYOUT,
-        n_st_est=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
-        split_name="val"
-    )
-    save_split_dataset(val_dataset, VAL_DATASET_PATH, "val")
-
-    test_dataset = build_split_dataset(
-        split_layouts=TEST_UE_LAYOUTS,
-        n_lt_true=LONGTERM_TRUE_SAMPLES_PER_LAYOUT,
-        n_st_est=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
-        split_name="test"
-    )
-    save_split_dataset(test_dataset, TEST_DATASET_PATH, "test")
+    print(f"[{dataset_name}] dataset 已儲存到：{save_path}")
 
 
 if __name__ == "__main__":
-    print("[INFO] 依 settings.py 的固定 split 生成 dataset ...")
-    build_and_save_all_datasets()
-    print("[INFO] 全部 dataset 生成完成。")
+    print("[INFO] 依 settings.py 的 layouts 生成 datasets ...")
+
+    train_dataset = build_dataset(
+        layouts=TRAIN_UE_LAYOUTS,
+        n_lt_true=LONGTERM_TRUE_SAMPLES_PER_LAYOUT,
+        n_st_est=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
+        dataset_name="train"
+    )
+    save_dataset(
+        dataset=train_dataset,
+        save_path=TRAIN_DATASET_PATH,
+        dataset_name="train"
+    )
+
+    val_dataset = build_dataset(
+        layouts=VAL_UE_LAYOUTS,
+        n_lt_true=LONGTERM_TRUE_SAMPLES_PER_LAYOUT,
+        n_st_est=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
+        dataset_name="val"
+    )
+    save_dataset(
+        dataset=val_dataset,
+        save_path=VAL_DATASET_PATH,
+        dataset_name="val"
+    )
+
+    test_dataset = build_dataset(
+        layouts=TEST_UE_LAYOUTS,
+        n_lt_true=LONGTERM_TRUE_SAMPLES_PER_LAYOUT,
+        n_st_est=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
+        dataset_name="test"
+    )
+    save_dataset(
+        dataset=test_dataset,
+        save_path=TEST_DATASET_PATH,
+        dataset_name="test"
+    )
+
+    print("[INFO] 全部 datasets 生成完成。")

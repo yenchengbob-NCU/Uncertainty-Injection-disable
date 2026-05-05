@@ -9,16 +9,15 @@ from tqdm import trange
 from settings import *
 from neural_net import LongTermPositionNet
 
+# ================================
+# Long-term validation config
+# ================================
+LT_VAL_LAYOUTS_PER_EPOCH = 40                  # 每個 epoch 從 validation pool 抽幾個 layouts 驗證
 
-# ============================================================
-# Long-term training config
-# ============================================================
-LONGTERM_BATCH_LAYOUTS = 32
 
-
-# ============================================================
+# ================================
 # Helpers
-# ============================================================
+# ================================
 def np_to_torch_complex(x_np: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(x_np).to(torch.complex64).to(DEVICE)
 
@@ -27,10 +26,14 @@ def np_to_torch_float(x_np: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(x_np).to(torch.float32).to(DEVICE)
 
 
-def load_longterm_dataset(npz_path: str, split_name: str):
+def load_longterm_dataset(npz_path: str, dataset_name: str):
+    """
+    載入  long-term 訓練需要的 dataset 欄位。
+    回傳: dataset : dict
+    """
     if not os.path.exists(npz_path):
         raise FileNotFoundError(
-            f"[{split_name}] 找不到 dataset 檔案：{npz_path}\n"
+            f"[{dataset_name}] 找不到 dataset 檔案：{npz_path}\n"
             f"請先執行 rician.py 生成固定 dataset。"
         )
 
@@ -38,190 +41,169 @@ def load_longterm_dataset(npz_path: str, split_name: str):
         "ue_layouts",
         "pl_BS_UE",
         "pl_BS_RIS_UE",
-        "pl_BS_TAR_BS",
         "lt_h_dk_true",
         "lt_h_rk_true",
         "lt_G_true",
-        "lt_g_dt_true",
     ]
 
     with np.load(npz_path) as data:
-        for k in required_keys:
-            if k not in data:
-                raise KeyError(f"[{split_name}] dataset 缺少欄位：{k}")
+        for key in required_keys:
+            if key not in data:
+                raise KeyError(f"[{dataset_name}] dataset 缺少欄位：{key}")
 
-        dataset = {k: data[k] for k in required_keys}
+        dataset = {key: data[key] for key in required_keys}
 
-    print(f"[{split_name}] loaded: {npz_path}")
-    print(f"[{split_name}] #layouts = {dataset['ue_layouts'].shape[0]}")
-    print(f"[{split_name}] lt_h_dk_true shape = {dataset['lt_h_dk_true'].shape}")
+    print(f"[{dataset_name}] loaded: {npz_path}")
+    print(f"[{dataset_name}] #layouts = {dataset['ue_layouts'].shape[0]}")
+    print(f"[{dataset_name}] lt_h_dk_true shape = {dataset['lt_h_dk_true'].shape}")
+    print(f"[{dataset_name}] lt_h_rk_true shape = {dataset['lt_h_rk_true'].shape}")
+    print(f"[{dataset_name}] lt_G_true shape    = {dataset['lt_G_true'].shape}")
+
     return dataset
 
 
-def sample_train_layout_ids(n_layouts: int, batch_size: int) -> np.ndarray:
-    replace = n_layouts < batch_size
-    return np.random.choice(n_layouts, size=batch_size, replace=replace)
-
-
-# ============================================================
-# Long-term objective for ONE minibatch of layouts
-# ============================================================
-def forward_longterm_batch_objective(
+# ================================
+# Long-term objective
+# ================================
+def forward_longterm_one_layout_objective(
     longterm_net: LongTermPositionNet,
     dataset,
-    layout_ids: np.ndarray,
+    layout_id: int,
 ):
     """
-    一個 minibatch = 32 個 layouts
-    對每個 layout:
+    計算單一 layout 的 long-term objective
+    流程:
         1. layout -> theta_LT, W_C_LT, W_R_LT
-        2. 使用對應的 long-term true/statistical channels
-        3. 算出 layout-level mean sum-rate
-        4. 減去 theta penalty, tx penalty
-    最後把 32 個 layout-level objectives 平均成 batch objective
+        2. 使用該 layout 的 statistical channels
+        3. 計算 layout-level mean sum-rate
+        4. 扣除 RIS amplitude penalty 與 TX power penalty
+    回傳:
+        objective : torch.Tensor
+        logs      : dict
     """
-    # --------------------------------------------------------
-    # 1) 這批 layouts 一次送進 long-term net
-    # --------------------------------------------------------
-    ue_layouts_np = dataset["ue_layouts"][layout_ids]     # (B,K,2)
-    ue_layouts_t = np_to_torch_float(ue_layouts_np)       # (B,K,2)
 
-    theta_lt, W_C_lt, W_R_lt = longterm_net(ue_layouts_t)  # (B,N), (B,M,K), (B,M,RADAR_STREAMS)
+    ue_layout_np = dataset["ue_layouts"][layout_id]                    # shape = (K,2)
+    ue_layout_t = np_to_torch_float(ue_layout_np).unsqueeze(0)         # shape = (1,K,2)
 
-    B = len(layout_ids)
+    theta_lt, W_C_lt, W_R_lt = longterm_net(ue_layout_t)               # (1,N), (1,M,K), (1,M,RADAR_STREAMS)
 
-    obj_list = []
-    sumrate_list = []
-    theta_pen_list = []
-    tx_pen_list = []
+    h_dk_true = np_to_torch_complex(dataset["lt_h_dk_true"][layout_id])  # shape = (S,M,K)
+    h_rk_true = np_to_torch_complex(dataset["lt_h_rk_true"][layout_id])  # shape = (S,N,K)
+    G_true    = np_to_torch_complex(dataset["lt_G_true"][layout_id])     # shape = (S,N,M)
 
-    # --------------------------------------------------------
-    # 2) 對每個 layout 使用它自己的 true/statistical channels
-    # --------------------------------------------------------
-    for b, layout_id in enumerate(layout_ids):
-        # 該 layout 的 true/statistical channels
-        h_dk_true = np_to_torch_complex(dataset["lt_h_dk_true"][layout_id])   # (S,M,K)
-        h_rk_true = np_to_torch_complex(dataset["lt_h_rk_true"][layout_id])   # (S,N,K)
-        G_true    = np_to_torch_complex(dataset["lt_G_true"][layout_id])      # (S,N,M)
-        g_dt_true = np_to_torch_complex(dataset["lt_g_dt_true"][layout_id])   # (S,M,RADAR_STREAMS)
+    pl_BS_UE     = dataset["pl_BS_UE"][layout_id]                      # shape = (K,)
+    pl_BS_RIS_UE = dataset["pl_BS_RIS_UE"][layout_id]                  # shape = (K,)
 
-        # 該 layout 的 pathloss
-        pl_BS_UE     = dataset["pl_BS_UE"][layout_id]         # (K,)
-        pl_BS_RIS_UE = dataset["pl_BS_RIS_UE"][layout_id]     # (K,)
+    S = h_dk_true.shape[0]                                             # statistical channels 數量
 
-        S = h_dk_true.shape[0]
+    theta_rep = theta_lt.expand(S, RIS_UNIT)                           # shape = (S,N)
+    W_C_rep   = W_C_lt.expand(S, TX_ANT, UAV_COMM)                     # shape = (S,M,K)
+    W_R_rep   = W_R_lt.expand(S, TX_ANT, RADAR_STREAMS)                # shape = (S,M,RADAR_STREAMS)
 
-        # 複製這個 layout 的輸出到 S 組通道上
-        theta_b = theta_lt[b].unsqueeze(0).expand(S, RIS_UNIT)               # (S,N)
-        W_C_b   = W_C_lt[b].unsqueeze(0).expand(S, TX_ANT, UAV_COMM)         # (S,M,K)
-        W_R_b   = W_R_lt[b].unsqueeze(0).expand(S, TX_ANT, RADAR_STREAMS)    # (S,M,RADAR_STREAMS)
+    sumrate_mean = longterm_net.compute_sum_rate(
+        h_dk=h_dk_true,
+        h_rk=h_rk_true,
+        G=G_true,
+        theta=theta_rep,
+        W_R=W_R_rep,
+        W_C=W_C_rep,
+        pl_BS_UE=pl_BS_UE,
+        pl_BS_RIS_UE=pl_BS_RIS_UE,
+    ).mean()
 
-        # 64 / 128 組 sum-rate -> layout-level mean sum-rate
-        sumrate_mean_b = longterm_net.compute_sum_rate(
-            h_dk=h_dk_true,
-            h_rk=h_rk_true,
-            G=G_true,
-            theta=theta_b,
-            W_R=W_R_b,
-            W_C=W_C_b,
-            pl_BS_UE=pl_BS_UE,
-            pl_BS_RIS_UE=pl_BS_RIS_UE,
-        ).mean()
+    theta_penalty = longterm_net.compute_ris_amplitude_penalty(
+        theta_lt
+    ).mean()
 
-        # theta penalty
-        theta_pen_b = longterm_net.compute_ris_amplitude_penalty(
-            theta_lt[b].unsqueeze(0)
-        ).mean()
+    tx_power = longterm_net.compute_tx_power(
+        W_C_lt,
+        W_R_lt
+    )
 
-        # tx penalty
-        tx_power_b = longterm_net.compute_tx_power(
-            W_C_lt[b].unsqueeze(0),
-            W_R_lt[b].unsqueeze(0)
-        )  # (1,)
-        tx_pen_b = torch.clamp(tx_power_b - TRANSMIT_POWER_TOTAL, min=0.0).mean()
+    tx_penalty = torch.clamp(
+        tx_power - TRANSMIT_POWER_TOTAL,
+        min=0.0
+    ).mean()
 
-        # layout-level objective
-        obj_b = (
-            sumrate_mean_b
-            - RE_POWER_LOSS_WEIGHT * theta_pen_b
-            - TX_POWER_LOSS_WEIGHT * tx_pen_b
-        )
-
-        obj_list.append(obj_b)
-        sumrate_list.append(sumrate_mean_b.detach())
-        theta_pen_list.append(theta_pen_b.detach())
-        tx_pen_list.append(tx_pen_b.detach())
-
-    # --------------------------------------------------------
-    # 3) 平均 32 個 layout-level objectives
-    # --------------------------------------------------------
-    batch_objective = torch.stack(obj_list).mean()
+    objective = (
+        sumrate_mean
+        - RE_POWER_LOSS_WEIGHT * theta_penalty
+        - TX_POWER_LOSS_WEIGHT * tx_penalty
+    )
 
     logs = {
-        "sum_rate_mean": torch.stack(sumrate_list).mean(),
-        "theta_penalty_mean": torch.stack(theta_pen_list).mean(),
-        "tx_penalty_mean": torch.stack(tx_pen_list).mean(),
-        "objective": batch_objective.detach(),
-        "num_layouts": B,
+        "sum_rate_mean": sumrate_mean.detach(),
+        "theta_penalty_mean": theta_penalty.detach(),
+        "tx_penalty_mean": tx_penalty.detach(),
+        "objective": objective.detach(),
+        "layout_id": layout_id,
+        "num_statistical_channels": S,
     }
-    return batch_objective, logs
+
+    return objective, logs
 
 
-# ============================================================
-# Validation over ALL val layouts
-# ============================================================
+# ================================
+# Long-term validation
+# ================================
 @torch.no_grad()
-def validate_longterm_all(
+def validate_longterm_sampled(
     longterm_net: LongTermPositionNet,
     val_dataset,
+    num_val_layouts: int,
 ):
     """
-    直接掃完整個 val split
-    每個 val layout 各自算一次 layout-level objective
-    最後平均成 val objective
+    從 validation pool 抽出 num_val_layouts 個 layouts 進行 validation。
+
+    回傳:
+        logs : dict
     """
     longterm_net.eval()
 
-    n_val_layouts = val_dataset["ue_layouts"].shape[0]
+    n_val_pool = val_dataset["ue_layouts"].shape[0]
+    num_val_layouts = min(num_val_layouts, n_val_pool)
+
+    replace = n_val_pool < num_val_layouts                              # pool 不足時允許重複抽樣
+    layout_ids = np.random.choice(n_val_pool, size=num_val_layouts, replace=replace)
 
     total_obj = 0.0
     total_sumrate = 0.0
     total_theta_pen = 0.0
     total_tx_pen = 0.0
 
-    for start in range(0, n_val_layouts, LONGTERM_BATCH_LAYOUTS):
-        end = min(start + LONGTERM_BATCH_LAYOUTS, n_val_layouts)
-        layout_ids = np.arange(start, end)
-
-        obj_t, logs = forward_longterm_batch_objective(
+    for layout_id in layout_ids:
+        obj_t, logs = forward_longterm_one_layout_objective(
             longterm_net=longterm_net,
             dataset=val_dataset,
-            layout_ids=layout_ids,
+            layout_id=int(layout_id),
         )
 
-        n_chunk = logs["num_layouts"]
-        total_obj += float(obj_t.detach().cpu()) * n_chunk
-        total_sumrate += float(logs["sum_rate_mean"].cpu()) * n_chunk
-        total_theta_pen += float(logs["theta_penalty_mean"].cpu()) * n_chunk
-        total_tx_pen += float(logs["tx_penalty_mean"].cpu()) * n_chunk
-
-    val_obj = total_obj / n_val_layouts
-    val_sumrate = total_sumrate / n_val_layouts
-    val_theta_pen = total_theta_pen / n_val_layouts
-    val_tx_pen = total_tx_pen / n_val_layouts
+        total_obj += float(obj_t.detach().cpu())
+        total_sumrate += float(logs["sum_rate_mean"].cpu())
+        total_theta_pen += float(logs["theta_penalty_mean"].cpu())
+        total_tx_pen += float(logs["tx_penalty_mean"].cpu())
 
     return {
-        "objective": val_obj,
-        "sum_rate_mean": val_sumrate,
-        "theta_penalty_mean": val_theta_pen,
-        "tx_penalty_mean": val_tx_pen,
+        "objective": total_obj / num_val_layouts,
+        "sum_rate_mean": total_sumrate / num_val_layouts,
+        "theta_penalty_mean": total_theta_pen / num_val_layouts,
+        "tx_penalty_mean": total_tx_pen / num_val_layouts,
+        "num_val_layouts": num_val_layouts,
     }
 
 
-# ============================================================
+# ================================
 # Train long-term
-# ============================================================
+# ================================
 def train_longterm(longterm_net, train_dataset, val_dataset):
+    """
+    訓練 long-term network。
+
+    訓練規則:
+        1. 每個 epoch 有 MINIBATCHES 次 update
+        2. 每次 update 只抽 1 個 train layout
+        3. 該 layout 使用所有 LT statistical channels 計算 objective
+    """
     optimizer = optim.Adam(longterm_net.parameters(), lr=LEARNING_RATE)
 
     best_val_obj = -np.inf
@@ -239,44 +221,36 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
         train_theta_pen_ep = 0.0
         train_tx_pen_ep = 0.0
 
-        # ----------------------------------------------------
-        # 每個 epoch：50 個 minibatches
-        # 每個 minibatch：抽 32 個 train layouts
-        # ----------------------------------------------------
         for _ in range(MINIBATCHES):
-            layout_ids = sample_train_layout_ids(
-                n_layouts=n_train_layouts,
-                batch_size=LONGTERM_BATCH_LAYOUTS
-            )
+            layout_id = int(np.random.randint(0, n_train_layouts))       # 每次 update 只抽 1 個 layout
 
             optimizer.zero_grad(set_to_none=True)
 
-            obj, logs = forward_longterm_batch_objective(
+            obj, logs = forward_longterm_one_layout_objective(
                 longterm_net=longterm_net,
                 dataset=train_dataset,
-                layout_ids=layout_ids,
+                layout_id=layout_id,
             )
 
-            (-obj).backward()
+            loss = -obj
+            loss.backward()
             optimizer.step()
 
-            train_obj_ep       += float(obj.detach().cpu()) / MINIBATCHES
-            train_sumrate_ep   += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
+            train_obj_ep += float(obj.detach().cpu()) / MINIBATCHES
+            train_sumrate_ep += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
             train_theta_pen_ep += float(logs["theta_penalty_mean"].cpu()) / MINIBATCHES
-            train_tx_pen_ep    += float(logs["tx_penalty_mean"].cpu()) / MINIBATCHES
+            train_tx_pen_ep += float(logs["tx_penalty_mean"].cpu()) / MINIBATCHES
 
-        # ----------------------------------------------------
-        # validation：掃過全部 val layouts 一次
-        # ----------------------------------------------------
-        val_logs = validate_longterm_all(
+        val_logs = validate_longterm_sampled(
             longterm_net=longterm_net,
             val_dataset=val_dataset,
+            num_val_layouts=LT_VAL_LAYOUTS_PER_EPOCH,
         )
 
-        val_obj_ep       = val_logs["objective"]
-        val_sumrate_ep   = val_logs["sum_rate_mean"]
+        val_obj_ep = val_logs["objective"]
+        val_sumrate_ep = val_logs["sum_rate_mean"]
         val_theta_pen_ep = val_logs["theta_penalty_mean"]
-        val_tx_pen_ep    = val_logs["tx_penalty_mean"]
+        val_tx_pen_ep = val_logs["tx_penalty_mean"]
 
         curves.append([
             train_obj_ep,
@@ -288,6 +262,7 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
             train_tx_pen_ep,
             val_tx_pen_ep,
         ])
+
         np.save(curve_path, np.array(curves, dtype=np.float32))
 
         print(
@@ -295,7 +270,8 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
             f"TrainObj={train_obj_ep:.4e} | ValObj={val_obj_ep:.4e} | "
             f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_sumrate_ep:.4e} | "
             f"TrainThetaPen={train_theta_pen_ep:.4e} | ValThetaPen={val_theta_pen_ep:.4e} | "
-            f"TrainTxPen={train_tx_pen_ep:.4e} | ValTxPen={val_tx_pen_ep:.4e}"
+            f"TrainTxPen={train_tx_pen_ep:.4e} | ValTxPen={val_tx_pen_ep:.4e} | "
+            f"ValLayouts={val_logs['num_val_layouts']}"
         )
 
         if val_obj_ep > best_val_obj:
@@ -305,10 +281,9 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
     print(f"[LongTerm] best ValObj = {best_val_obj:.4e}")
     longterm_net.load_model(verbose=True)
 
-
-# ============================================================
+# ================================
 # Main
-# ============================================================
+# ================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train long-term network only")
     parser.add_argument(
@@ -318,7 +293,7 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    print("[INFO] 載入固定 nested datasets ...")
+    print("[INFO] 載入固定 datasets ...")
 
     train_dataset = load_longterm_dataset(TRAIN_DATASET_PATH, "train")
     val_dataset   = load_longterm_dataset(VAL_DATASET_PATH, "val")
@@ -330,6 +305,8 @@ if __name__ == "__main__":
         longterm_net.load_model(verbose=True)
 
     print("[INFO] 開始 long-term 訓練 ...")
+    print("[INFO] Training rule: one minibatch = one layout objective.")
+
     train_longterm(
         longterm_net=longterm_net,
         train_dataset=train_dataset,

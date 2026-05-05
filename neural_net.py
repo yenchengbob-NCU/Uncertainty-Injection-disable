@@ -300,5 +300,5 @@ class ShortTermRadarNet(ISACNetBase):
     def forward(self, h_dk, h_rk, G, g_dt, theta):
         x = self.encode_shortterm_inputs(h_dk, h_rk, G, g_dt, theta)
         y = self.forward_mlp(x)
-        W_R = self.decode_complex(y, (TX_ANT, 1))
+        W_R = self.decode_complex(y, (TX_ANT, RADAR_STREAMS))
         return W_R

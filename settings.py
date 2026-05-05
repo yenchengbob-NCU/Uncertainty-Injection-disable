@@ -23,9 +23,9 @@ if torch.cuda.is_available():
 # ================================
 # 系統維度
 # ================================
-TX_ANT   = 6                # BS 發射天線數 M
+TX_ANT   = 6                # BS  發射天線數 M
 RIS_UNIT = 40               # RIS 反射單元數 N
-UAV_COMM = 2                # 通訊 UE / UAV 數 K
+UAV_COMM = 2                # 通訊 UE 數     K
 RADAR_STREAMS = TX_ANT      # sensing waveforms 數量
 
 
@@ -61,35 +61,27 @@ UE_RADIUS = 3.0
 RIS_FRONT_NORMAL = (-1.0, 0.0)   # RIS 法線朝向原點
 
 # ================================
-# dataset生成 (UE位置)
+# dataset 生成
 # ================================
-# 說明：
-# 1. 先生成 LONG_TERM_LAYOUT_SAMPLES 組 UE layouts
-# 2. 再固定切成 train / val / test = 8 : 1 : 1
-# 3. 每個 layout 底下再由 rician.py 生成固定通道資料：
-#    - long-term 用的 true/statistical channels
-#    - short-term 用的 estimated channels
+"""
+說明：
+    1. train / validation / test 各自獨立生成 UE layouts
+    2. 每個 layout 底下再由 rician.py 生成固定通道資料：
+        - long-term  用的 statistical channels
+        - short-term 用的 estimated channels
+"""
 
-# ---------- layout 總數 ----------
-LONG_TERM_LAYOUT_SAMPLES = 1000
+N_TRAIN_LAYOUTS = 500                           # train layout 數量
+N_VAL_LAYOUTS   = 200                           # validation layout pool 數量
+N_TEST_LAYOUTS  = 100                           # test layout 數量
 
-# ---------- split 比例 ----------
-TRAIN_LAYOUT_RATIO = 0.8
-VAL_LAYOUT_RATIO   = 0.1
-TEST_LAYOUT_RATIO  = 0.1
-
-# ---------- 每個 layout 的固定通道樣本數 ----------
-# Long-term 用：true / statistical channels
-LONGTERM_TRUE_SAMPLES_PER_LAYOUT = 128
-
-# Short-term 用：estimated channels
-SHORTTERM_EST_CHANNELS_PER_LAYOUT = 2000
+LONGTERM_TRUE_SAMPLES_PER_LAYOUT  = 128         # Long-term   : statistical channels 數
+SHORTTERM_EST_CHANNELS_PER_LAYOUT = 2000        # short-term  : estimated   channels 數
 
 def random_points_on_circle(center, radius, num_points, normal=(-1.0, 0.0)):
     """
     在指定圓周上隨機取點，並只保留 normal 指向的正面半圓。
-    回傳:
-        [(x1, y1), (x2, y2), ...]
+    回傳:[(x1, y1), (x2, y2), ...]
     """
     cx, cy = center
     nx, ny = normal
@@ -113,46 +105,25 @@ def random_points_on_circle(center, radius, num_points, normal=(-1.0, 0.0)):
 
     return points
 
-# ---------- 生成 layout 母體 ----------
-# UE_LAYOUT_BANK[n] = [(x1,y1), (x2,y2), ...]
 
-UE_LAYOUT_BANK = [
-    random_points_on_circle(
-        center=Q_RIS,
-        radius=UE_RADIUS,
-        num_points=UAV_COMM,
-        normal=RIS_FRONT_NORMAL
-    )
-    for _ in range(LONG_TERM_LAYOUT_SAMPLES)
-]
+def layout_gen(num_layouts):
+    layouts = []
 
+    for _ in range(num_layouts):
+        ue_layout = random_points_on_circle(
+            center=Q_RIS,
+            radius=UE_RADIUS,
+            num_points=UAV_COMM,
+            normal=RIS_FRONT_NORMAL
+        )
 
-# ---------- 固定 split ----------
-layout_indices = np.arange(LONG_TERM_LAYOUT_SAMPLES)
-rng = np.random.default_rng(RANDOM_SEED)
-rng.shuffle(layout_indices)
+        layouts.append(ue_layout)
 
-N_TRAIN_LAYOUTS = int(TRAIN_LAYOUT_RATIO * LONG_TERM_LAYOUT_SAMPLES)
-N_VAL_LAYOUTS   = int(VAL_LAYOUT_RATIO   * LONG_TERM_LAYOUT_SAMPLES)
-N_TEST_LAYOUTS  = LONG_TERM_LAYOUT_SAMPLES - N_TRAIN_LAYOUTS - N_VAL_LAYOUTS
+    return layouts
 
-TRAIN_LAYOUT_IDS = layout_indices[:N_TRAIN_LAYOUTS]
-VAL_LAYOUT_IDS   = layout_indices[N_TRAIN_LAYOUTS:N_TRAIN_LAYOUTS + N_VAL_LAYOUTS]
-TEST_LAYOUT_IDS  = layout_indices[N_TRAIN_LAYOUTS + N_VAL_LAYOUTS:]
-
-TRAIN_UE_LAYOUTS = [UE_LAYOUT_BANK[i] for i in TRAIN_LAYOUT_IDS]
-VAL_UE_LAYOUTS   = [UE_LAYOUT_BANK[i] for i in VAL_LAYOUT_IDS]
-TEST_UE_LAYOUTS  = [UE_LAYOUT_BANK[i] for i in TEST_LAYOUT_IDS]
-
-# ---------- 統一包裝 ----------
-UE_LAYOUT_SPLIT = {
-    "train_ids": TRAIN_LAYOUT_IDS,
-    "val_ids": VAL_LAYOUT_IDS,
-    "test_ids": TEST_LAYOUT_IDS,
-    "train_layouts": TRAIN_UE_LAYOUTS,
-    "val_layouts": VAL_UE_LAYOUTS,
-    "test_layouts": TEST_UE_LAYOUTS,
-}
+TRAIN_UE_LAYOUTS = layout_gen(N_TRAIN_LAYOUTS)  # train layouts
+VAL_UE_LAYOUTS   = layout_gen(N_VAL_LAYOUTS)    # validation layout pool
+TEST_UE_LAYOUTS  = layout_gen(N_TEST_LAYOUTS)   # fixed test layouts
 
 # ================================
 # Robust / uncertainty injection
@@ -183,8 +154,7 @@ THR_TAG = (
 SETTING_STRING = (
     f"N0_{NOISE_POWER}_"
     f"INJERR_{INJECTION_VARIANCE}_"
-    f"TXpower_{TRANSMIT_POWER_TOTAL}W_"
-    f"LTlayouts_{LONG_TERM_LAYOUT_SAMPLES}"
+    f"TXpower_{TRANSMIT_POWER_TOTAL}"
 )
 
 PROJECT_DIR = os.path.join("MLP", SCENARIO_TAG, THR_TAG, SETTING_STRING)
@@ -204,11 +174,5 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 if __name__ == "__main__":
     print(f"\n[DEBUG] RANDOM_SEED = {RANDOM_SEED}")
-    print(f"[DEBUG] LONG_TERM_LAYOUT_SAMPLES = {LONG_TERM_LAYOUT_SAMPLES}")
-    print(f"[DEBUG] train / val / test = {N_TRAIN_LAYOUTS} / {N_VAL_LAYOUTS} / {N_TEST_LAYOUTS}")
-
-    print("[DEBUG] First 3 train layouts:")
-    for i in range(min(3, len(TRAIN_UE_LAYOUTS))):
-        print(f"  Train Layout {i}: {TRAIN_UE_LAYOUTS[i]}")
-
+    print(f"[DEBUG] train / val / test layouts = {N_TRAIN_LAYOUTS} / {N_VAL_LAYOUTS} / {N_TEST_LAYOUTS}")
     print(f"[INFO] 專案資料夾：{PROJECT_DIR}")
