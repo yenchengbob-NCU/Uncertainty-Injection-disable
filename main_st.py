@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import os
 import math
+import argparse
 import numpy as np
 import torch
 import torch.optim as optim
+import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
@@ -12,8 +14,8 @@ from neural_net import LongTermPositionNet, ShortTermCommNet, ShortTermRadarNet
 # ================================
 # Short-term validation 設定
 # ================================
-ST_VAL_LAYOUTS_PER_EPOCH = 50                  # 每個 epoch 從 validation pool 抽幾個 layouts
-ST_VAL_CHANNELS_PER_LAYOUT = 1000              # 每個 validation layout 抽幾組 estimated channels
+ST_VAL_LAYOUTS_PER_EPOCH = N_VAL_LAYOUTS                        # 每個 epoch 從 validation pool 抽幾個 layouts
+ST_VAL_CHANNELS_PER_LAYOUT = SHORTTERM_EST_CHANNELS_PER_LAYOUT  # 每個 validation layout 抽幾組 estimated channels
 
 # robust injection 分塊，避免顯存爆
 INJECTION_CHUNK = 50
@@ -480,7 +482,7 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
 
     n_train_layouts = train_dataset["ue_layouts"].shape[0]
 
-    for ep in trange(1, EPOCHS + 1, desc="ShortTerm-Regular"):
+    for ep in trange(1, 150 + 1, desc="ShortTerm-Regular"):
         comm_net.train()
         radar_net.train()
 
@@ -563,7 +565,7 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
     """
     optimizer = optim.Adam(
         list(comm_net.parameters()) + list(radar_net.parameters()),
-        lr=LEARNING_RATE
+        lr=0.0002
     )
 
     best_val_obj = -np.inf
@@ -577,7 +579,7 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
 
     n_train_layouts = train_dataset["ue_layouts"].shape[0]
 
-    for ep in trange(1, 200 + 1, desc="ShortTerm-Robust"):
+    for ep in trange(1, 1000 + 1, desc="ShortTerm-Robust"):
         comm_net.train()
         radar_net.train()
 
@@ -653,9 +655,89 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
 
 
 # ================================
+# Plot short-term objective curves
+# ================================
+def plot_shortterm_objective_curve():
+    reg_curve_path = os.path.join(
+        CURVE_DIR,
+        f"shortterm_regular_curves_{SETTING_STRING}.npy"
+    )
+
+    rob_curve_path = os.path.join(
+        CURVE_DIR,
+        f"shortterm_robust_curves_{SETTING_STRING}.npy"
+    )
+
+    reg_curves = np.load(reg_curve_path)
+    rob_curves = np.load(rob_curve_path)
+    # 跳過 epoch 1，避免初期 objective 過低壓縮後期曲線
+    start_idx = 1
+
+    reg_epochs = np.arange(start_idx + 1, reg_curves.shape[0] + 1)
+    rob_epochs = np.arange(start_idx + 1, rob_curves.shape[0] + 1)
+
+    reg_train_obj = reg_curves[start_idx:, 0]
+    reg_val_obj   = reg_curves[start_idx:, 1]
+
+    rob_train_obj = rob_curves[start_idx:, 0]
+    rob_val_obj   = rob_curves[start_idx:, 1]
+
+    # ---------- REG ----------
+    reg_fig_path = os.path.join(
+        CURVE_DIR,
+        f"shortterm_regular_objective_curve_{SETTING_STRING}.jpg"
+    )
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(reg_epochs, reg_train_obj, label="REG Train Objective")
+    plt.plot(reg_epochs, reg_val_obj, label="REG Validation Objective")
+    plt.xlabel("Epoch")
+    plt.ylabel("Objective")
+    plt.title("Short-term Regular Training / Validation Objective")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(reg_fig_path, format="jpg", dpi=300)
+    print(f"[PLOT] 已儲存 regular objective curve：{reg_fig_path}")
+    plt.show()
+    plt.close()
+
+    # ---------- ROB ----------
+    rob_fig_path = os.path.join(
+        CURVE_DIR,
+        f"shortterm_robust_objective_curve_{SETTING_STRING}.jpg"
+    )
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(rob_epochs, rob_train_obj, label="ROB Train Objective")
+    plt.plot(rob_epochs, rob_val_obj, label="ROB Validation Objective")
+    plt.xlabel("Epoch")
+    plt.ylabel("Objective")
+    plt.title("Short-term Robust Training / Validation Objective")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(rob_fig_path, format="jpg", dpi=300)
+    print(f"[PLOT] 已儲存 robust objective curve：{rob_fig_path}")
+    plt.show()
+    plt.close()
+
+
+# ================================
 # Main
 # ================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train short-term networks")
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="只讀取 short-term curve .npy 並畫圖，不進行訓練"
+    )
+    args = parser.parse_args()
+    if args.plot:
+        plot_shortterm_objective_curve()
+        raise SystemExit
+
     print("[INFO] 載入固定 datasets ...")
 
     train_dataset = load_shortterm_dataset(TRAIN_DATASET_PATH, "train")

@@ -4,6 +4,7 @@ import argparse
 import numpy as np
 import torch
 import torch.optim as optim
+import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
@@ -12,7 +13,7 @@ from neural_net import LongTermPositionNet
 # ================================
 # Long-term validation config
 # ================================
-LT_VAL_LAYOUTS_PER_EPOCH = 40                  # 每個 epoch 從 validation pool 抽幾個 layouts 驗證
+LT_VAL_LAYOUTS_PER_EPOCH = N_VAL_LAYOUTS                  # 每個 epoch 從 validation pool 抽幾個 layouts 驗證
 
 
 # ================================
@@ -282,6 +283,38 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
     longterm_net.load_model(verbose=True)
 
 # ================================
+# Plot long-term objective curve
+# ================================
+def plot_longterm_objective_curve():
+    curve_path = os.path.join(CURVE_DIR,f"longterm_curves_{SETTING_STRING}.npy")
+    curves = np.load(curve_path)
+    # 跳過 epoch 1，避免初期 objective 過低壓縮後期曲線
+    start_idx = 1
+    epochs = np.arange(start_idx + 1, curves.shape[0] + 1)
+
+    train_obj = curves[start_idx:, 0]
+    val_obj = curves[start_idx:, 1]
+
+    fig_path = os.path.join(CURVE_DIR,f"longterm_objective_curve_{SETTING_STRING}.jpg")
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(epochs, train_obj, label="Train Objective")
+    plt.plot(epochs, val_obj, label="Validation Objective")
+
+    plt.xlabel("Epoch")
+    plt.ylabel("Objective")
+    plt.title("Long-term Training / Validation Objective")
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(fig_path, format="jpg", dpi=300)
+    print(f"[PLOT] 已儲存 long-term objective curve：{fig_path}")
+
+    plt.show()
+    plt.close()
+
+# ================================
 # Main
 # ================================
 if __name__ == "__main__":
@@ -291,7 +324,16 @@ if __name__ == "__main__":
         action="store_true",
         help="若已存在 long-term ckpt，則先載入再繼續訓練"
     )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="只讀取 long-term curve .npy 並畫圖，不進行訓練"
+    )
     args = parser.parse_args()
+
+    if args.plot:
+        plot_longterm_objective_curve()
+        raise SystemExit
 
     print("[INFO] 載入固定 datasets ...")
 

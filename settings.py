@@ -46,9 +46,9 @@ TRANSMIT_POWER_TOTAL = 1.0
 SENSING_SNR_THRESHOLD_dB = 15
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)
 
-SENSING_LOSS_WEIGHT  = 500.0
-RE_POWER_LOSS_WEIGHT = 100.0
-TX_POWER_LOSS_WEIGHT = 100.0
+SENSING_LOSS_WEIGHT  = 100.0
+RE_POWER_LOSS_WEIGHT = 250.0
+TX_POWER_LOSS_WEIGHT = 25000.0
 
 # ================================
 # 幾何場景
@@ -71,12 +71,12 @@ RIS_FRONT_NORMAL = (-1.0, 0.0)   # RIS 法線朝向原點
         - short-term 用的 estimated channels
 """
 
-N_TRAIN_LAYOUTS = 500                           # train layout 數量
-N_VAL_LAYOUTS   = 200                           # validation layout pool 數量
+N_TRAIN_LAYOUTS = 300                           # train layout 數量
+N_VAL_LAYOUTS   = 100                           # validation layout pool 數量
 N_TEST_LAYOUTS  = 100                           # test layout 數量
 
 LONGTERM_TRUE_SAMPLES_PER_LAYOUT  = 128         # Long-term   : statistical channels 數
-SHORTTERM_EST_CHANNELS_PER_LAYOUT = 2000        # short-term  : estimated   channels 數
+SHORTTERM_EST_CHANNELS_PER_LAYOUT = 1000        # short-term  : estimated   channels 數
 
 def random_points_on_circle(center, radius, num_points, normal=(-1.0, 0.0)):
     """
@@ -128,16 +128,16 @@ TEST_UE_LAYOUTS  = layout_gen(N_TEST_LAYOUTS)   # fixed test layouts
 # ================================
 # Robust / uncertainty injection
 # ================================
-INJECTION_VARIANCE = 0.075
+INJECTION_VARIANCE = 0.035
 INJECTION_SAMPLES  = 1000
 OUTAGE_QUANTILE    = 0.05
 
 # ================================
 # 訓練 / 驗證 / 測試
 # ================================
-EPOCHS      = 100
+EPOCHS      = 150
 MINIBATCHES = 50
-BATCH_SIZE  = 1000
+BATCH_SIZE  = 500
 
 LEARNING_RATE = 1e-3
 

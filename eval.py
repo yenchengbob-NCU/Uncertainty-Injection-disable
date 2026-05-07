@@ -12,7 +12,6 @@ from neural_net import LongTermPositionNet, ShortTermCommNet, ShortTermRadarNet
 # ================================
 # Evaluation config
 # ================================
-EVAL_CHANNEL_ID = 0                                  # 每個 layout 固定取 estimated channel id = 0
 EVAL_CHUNK = 50                                      # evaluation injection 分塊大小
 
 
@@ -222,7 +221,7 @@ def eval_one_model_with_fixed_beams(
         theta_rep = theta_batch.unsqueeze(1).expand(B, s, N).reshape(B * s, N)
         W_C_rep = W_C.unsqueeze(1).expand(B, s, M, K).reshape(B * s, M, K)
 
-        radar_streams = W_R.shape[2]                                     # sensing streams 數量
+        radar_streams = W_R.shape[2]
         W_R_rep = W_R.unsqueeze(1).expand(
             B, s, M, radar_streams
         ).reshape(B * s, M, radar_streams)
@@ -257,14 +256,14 @@ def eval_one_model_with_fixed_beams(
     sumrate_mean = sumrate_samples.mean(dim=1)                           # shape = (B,)
     sumrate_min = sumrate_samples.min(dim=1).values                      # shape = (B,)
 
-    snr_violation_prob = (snr_samples < SENSING_SNR_THRESHOLD).float().mean(dim=1)   # shape = (B,)
-    snr_penalty = torch.clamp(snr_violation_prob - q, min=0.0)                      # shape = (B,)
+    snr_violation_prob = (snr_samples < SENSING_SNR_THRESHOLD).float().mean(dim=1)
+    snr_penalty = torch.clamp(snr_violation_prob - q, min=0.0)
 
     objective = (
         sumrate_mean
         - SENSING_LOSS_WEIGHT * snr_penalty
         - TX_POWER_LOSS_WEIGHT * tx_excess
-    )                                                                    # shape = (B,)
+    )
 
     return {
         "sumrate_mean": sumrate_mean.detach().cpu().numpy(),
@@ -278,10 +277,10 @@ def eval_one_model_with_fixed_beams(
 
 def summarize_metrics(metrics: dict) -> dict:
     """
-    將 sample-level metrics 平均成 layout-level summary。
+    將 estimated-channel-level metrics 平均成 layout-level summary。
 
-    目前每個 layout 只取 1 筆 estimated channel，
-    所以 layout-level summary 等同於該 layout 的 channel-id=0 結果。
+    目前每個 layout 使用全部 estimated channels，
+    所以 layout-level summary 是該 layout 下所有 estimated channels 的平均結果。
     """
     return {
         "objective": float(np.mean(metrics["objective"])),
@@ -306,8 +305,7 @@ if __name__ == "__main__":
     print("[EVAL] Two-timescale TEST evaluation")
     print(f"[EVAL] #test layouts          = {n_layouts}")
     print(f"[EVAL] #evaluated layouts     = {n_eval_layouts}")
-    print(f"[EVAL] channels per layout   = 1 fixed estimated channel")
-    print(f"[EVAL] fixed channel id      = {EVAL_CHANNEL_ID}")
+    print("[EVAL] channels per layout   = all estimated channels")
     print(f"[EVAL] injection samples     = {INJECTION_SAMPLES}")
     print(f"[EVAL] injection variance    = {INJECTION_VARIANCE}")
     print(f"[EVAL] outage quantile q     = {OUTAGE_QUANTILE}")
@@ -348,14 +346,7 @@ if __name__ == "__main__":
         theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)          # shape = (1,N)
 
         n_pool = test_dataset["st_h_dk_hat"][layout_id].shape[0]
-
-        if EVAL_CHANNEL_ID < 0 or EVAL_CHANNEL_ID >= n_pool:
-            raise ValueError(
-                f"EVAL_CHANNEL_ID={EVAL_CHANNEL_ID} 超出範圍。"
-                f"此 layout 的 estimated channel 數量為 {n_pool}。"
-            )
-
-        channel_ids = np.array([EVAL_CHANNEL_ID], dtype=np.int32)                    # 每個 layout 固定取 1 筆 estimated channel
+        channel_ids = np.arange(n_pool, dtype=np.int32)                              # 使用全部 estimated channels
 
         batch_data = extract_test_batch(test_dataset, layout_id, channel_ids)
         B = len(channel_ids)
@@ -435,7 +426,10 @@ if __name__ == "__main__":
         reg_layout_vprob_list.append(reg_layout_summary["violation_prob"])
         rob_layout_vprob_list.append(rob_layout_summary["violation_prob"])
 
-        print(f"[EVAL] layout {local_idx + 1}/{n_eval_layouts} done. layout_id={layout_id}, channel_id={EVAL_CHANNEL_ID}")
+        print(
+            f"[EVAL] layout {local_idx + 1}/{n_eval_layouts} done. "
+            f"layout_id={layout_id}, channels={B}"
+        )
 
     reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)
     rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)
@@ -493,7 +487,7 @@ if __name__ == "__main__":
     eval_tag = (
         f"test_"
         f"L{n_layouts}_"
-        f"C1_ch{EVAL_CHANNEL_ID}_"
+        f"Call_"
         f"INJ{INJECTION_SAMPLES}"
     )
 
@@ -586,7 +580,7 @@ if __name__ == "__main__":
     print(f"  REG: {reg_tx_all.mean():.6e}")
     print(f"  ROB: {rob_tx_all.mean():.6e}")
 
-    print("[Diagnostic] Fraction of samples with P(SNR<thr) > q:")
+    print("[Diagnostic] Fraction of estimated-channel cases with P(SNR<thr) > q:")
     print(f"  REG: {(reg_snr_vprob_all > q).mean() * 100:.3f}%")
     print(f"  ROB: {(rob_snr_vprob_all > q).mean() * 100:.3f}%")
 
