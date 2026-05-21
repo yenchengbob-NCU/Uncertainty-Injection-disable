@@ -12,7 +12,7 @@ from neural_net import LongTermPositionNet, ShortTermCommNet, ShortTermRadarNet
 # ================================
 # Evaluation config
 # ================================
-EVAL_CHANNEL_ID = 0                                  # 每個 layout 固定取 estimated channel id = 0
+
 EVAL_CHUNK = 50                                      # evaluation injection 分塊大小
 
 
@@ -140,7 +140,6 @@ def compute_shortterm_outputs(
     回傳:
         W_C       : torch.Tensor, shape = (B,M,K)
         W_R       : torch.Tensor, shape = (B,M,RADAR_STREAMS)
-        tx_excess : torch.Tensor, shape = (B,)
     """
     comm_net.eval()
     radar_net.eval()
@@ -156,10 +155,9 @@ def compute_shortterm_outputs(
     W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)    # shape = (B,M,K)
     W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)   # shape = (B,M,RADAR_STREAMS)
 
-    tx_power = comm_net.compute_tx_power(W_C, W_R)                      # shape = (B,)
-    tx_excess = torch.clamp(tx_power - TRANSMIT_POWER_TOTAL, min=0.0)   # shape = (B,)
+    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)                   # TX power scaling
 
-    return W_C, W_R, tx_excess
+    return W_C, W_R
 
 
 @torch.no_grad()
@@ -168,7 +166,6 @@ def eval_one_model_with_fixed_beams(
     theta_fixed: torch.Tensor,
     W_C: torch.Tensor,
     W_R: torch.Tensor,
-    tx_excess: torch.Tensor,
     batch_data: dict,
     injection_samples: int,
     injection_variance: float,
@@ -263,7 +260,6 @@ def eval_one_model_with_fixed_beams(
     objective = (
         sumrate_mean
         - SENSING_LOSS_WEIGHT * snr_penalty
-        - TX_POWER_LOSS_WEIGHT * tx_excess
     )                                                                    # shape = (B,)
 
     return {
@@ -272,7 +268,6 @@ def eval_one_model_with_fixed_beams(
         "snr_violation_prob": snr_violation_prob.detach().cpu().numpy(),
         "snr_penalty": snr_penalty.detach().cpu().numpy(),
         "objective": objective.detach().cpu().numpy(),
-        "tx_excess": tx_excess.detach().cpu().numpy(),
     }
 
 
@@ -280,15 +275,14 @@ def summarize_metrics(metrics: dict) -> dict:
     """
     將 sample-level metrics 平均成 layout-level summary。
 
-    目前每個 layout 只取 1 筆 estimated channel，
-    所以 layout-level summary 等同於該 layout 的 channel-id=0 結果。
+    目前每個 layout 取多筆 estimated channels，
+    所以 layout-level summary 為該 layout 內所有 evaluated channels 的平均。
     """
     return {
         "objective": float(np.mean(metrics["objective"])),
         "mean_sumrate": float(np.mean(metrics["sumrate_mean"])),
         "min_sumrate": float(np.mean(metrics["sumrate_min"])),
         "violation_prob": float(np.mean(metrics["snr_violation_prob"])),
-        "tx_excess": float(np.mean(metrics["tx_excess"])),
     }
 
 
@@ -307,7 +301,6 @@ if __name__ == "__main__":
     print(f"[EVAL] #test layouts          = {n_layouts}")
     print(f"[EVAL] #evaluated layouts     = {n_eval_layouts}")
     print(f"[EVAL] channels per layout   = 1 fixed estimated channel")
-    print(f"[EVAL] fixed channel id      = {EVAL_CHANNEL_ID}")
     print(f"[EVAL] injection samples     = {INJECTION_SAMPLES}")
     print(f"[EVAL] injection variance    = {INJECTION_VARIANCE}")
     print(f"[EVAL] outage quantile q     = {OUTAGE_QUANTILE}")
@@ -333,7 +326,6 @@ if __name__ == "__main__":
     reg_snr_vprob_list, rob_snr_vprob_list = [], []
     reg_snr_pen_list, rob_snr_pen_list = [], []
     reg_obj_list, rob_obj_list = [], []
-    reg_tx_list, rob_tx_list = [], []
     layout_id_list = []
 
     reg_layout_obj_list, rob_layout_obj_list = [], []
@@ -349,25 +341,20 @@ if __name__ == "__main__":
 
         n_pool = test_dataset["st_h_dk_hat"][layout_id].shape[0]
 
-        if EVAL_CHANNEL_ID < 0 or EVAL_CHANNEL_ID >= n_pool:
-            raise ValueError(
-                f"EVAL_CHANNEL_ID={EVAL_CHANNEL_ID} 超出範圍。"
-                f"此 layout 的 estimated channel 數量為 {n_pool}。"
-            )
-
-        channel_ids = np.array([EVAL_CHANNEL_ID], dtype=np.int32)                    # 每個 layout 固定取 1 筆 estimated channel
+        num_eval_channels = min(SHORTTERM_EST_CHANNELS_PER_LAYOUT, n_pool)
+        channel_ids = np.arange(num_eval_channels, dtype=np.int32)
 
         batch_data = extract_test_batch(test_dataset, layout_id, channel_ids)
         B = len(channel_ids)
 
-        W_C_reg, W_R_reg, tx_excess_reg = compute_shortterm_outputs(
+        W_C_reg, W_R_reg = compute_shortterm_outputs(
             short_comm_reg,
             short_radar_reg,
             theta_fixed,
             batch_data
         )
 
-        W_C_rob, W_R_rob, tx_excess_rob = compute_shortterm_outputs(
+        W_C_rob, W_R_rob = compute_shortterm_outputs(
             short_comm_rob,
             short_radar_rob,
             theta_fixed,
@@ -379,7 +366,6 @@ if __name__ == "__main__":
             theta_fixed=theta_fixed,
             W_C=W_C_reg,
             W_R=W_R_reg,
-            tx_excess=tx_excess_reg,
             batch_data=batch_data,
             injection_samples=INJECTION_SAMPLES,
             injection_variance=INJECTION_VARIANCE,
@@ -392,7 +378,6 @@ if __name__ == "__main__":
             theta_fixed=theta_fixed,
             W_C=W_C_rob,
             W_R=W_R_rob,
-            tx_excess=tx_excess_rob,
             batch_data=batch_data,
             injection_samples=INJECTION_SAMPLES,
             injection_variance=INJECTION_VARIANCE,
@@ -415,9 +400,6 @@ if __name__ == "__main__":
         reg_obj_list.append(reg_metrics["objective"])
         rob_obj_list.append(rob_metrics["objective"])
 
-        reg_tx_list.append(reg_metrics["tx_excess"])
-        rob_tx_list.append(rob_metrics["tx_excess"])
-
         layout_id_list.append(np.full(B, layout_id, dtype=np.int32))                  # 紀錄實際 test layout id
 
         reg_layout_summary = summarize_metrics(reg_metrics)
@@ -435,7 +417,7 @@ if __name__ == "__main__":
         reg_layout_vprob_list.append(reg_layout_summary["violation_prob"])
         rob_layout_vprob_list.append(rob_layout_summary["violation_prob"])
 
-        print(f"[EVAL] layout {local_idx + 1}/{n_eval_layouts} done. layout_id={layout_id}, channel_id={EVAL_CHANNEL_ID}")
+        print(f"[EVAL] layout {local_idx + 1}/{n_eval_layouts} done. layout_id={layout_id}")
 
     reg_sumrate_mean_all = np.concatenate(reg_sumrate_mean_list, axis=0)
     rob_sumrate_mean_all = np.concatenate(rob_sumrate_mean_list, axis=0)
@@ -451,9 +433,6 @@ if __name__ == "__main__":
 
     reg_obj_all = np.concatenate(reg_obj_list, axis=0)
     rob_obj_all = np.concatenate(rob_obj_list, axis=0)
-
-    reg_tx_all = np.concatenate(reg_tx_list, axis=0)
-    rob_tx_all = np.concatenate(rob_tx_list, axis=0)
 
     layout_id_all = np.concatenate(layout_id_list, axis=0)
 
@@ -493,7 +472,7 @@ if __name__ == "__main__":
     eval_tag = (
         f"test_"
         f"L{n_layouts}_"
-        f"C1_ch{EVAL_CHANNEL_ID}_"
+        f"C{SHORTTERM_EST_CHANNELS_PER_LAYOUT}_"
         f"INJ{INJECTION_SAMPLES}"
     )
 
@@ -511,8 +490,6 @@ if __name__ == "__main__":
         rob_snr_pen_all=rob_snr_pen_all,
         reg_obj_all=reg_obj_all,
         rob_obj_all=rob_obj_all,
-        reg_tx_all=reg_tx_all,
-        rob_tx_all=rob_tx_all,
         layout_id_all=layout_id_all,
         reg_layout_obj=np.array(reg_layout_obj_list, dtype=np.float32),
         rob_layout_obj=np.array(rob_layout_obj_list, dtype=np.float32),
@@ -581,10 +558,6 @@ if __name__ == "__main__":
     print("[Diagnostic] Mean SNR penalty:")
     print(f"  REG: {reg_snr_pen_all.mean():.6e}")
     print(f"  ROB: {rob_snr_pen_all.mean():.6e}")
-
-    print("[Diagnostic] Mean TX excess:")
-    print(f"  REG: {reg_tx_all.mean():.6e}")
-    print(f"  ROB: {rob_tx_all.mean():.6e}")
 
     print("[Diagnostic] Fraction of samples with P(SNR<thr) > q:")
     print(f"  REG: {(reg_snr_vprob_all > q).mean() * 100:.3f}%")

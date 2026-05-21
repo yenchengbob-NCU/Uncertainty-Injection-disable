@@ -215,6 +215,29 @@ class ISACNetBase(nn.Module):
         W_R = torch.as_tensor(W_R, dtype=torch.complex64, device=self.model_device)
         return (W_C.abs() ** 2).sum(dim=(1, 2)) + (W_R.abs() ** 2).sum(dim=(1, 2))
 
+    def normalize_tx_power(self, W_C, W_R, eps: float = 1e-12):
+        """
+        將 ST nets 輸出的 raw beamformers 做總發射功率 scaling。
+        先計算 raw power： P_raw = ||W_C_raw||_F^2 + ||W_R_raw||_F^2
+        再用同一個 scaling factor 同時縮放 W_C 與 W_R：
+        scale = sqrt(P_max / (P_raw + eps))
+        W_C = scale * W_C_raw
+        W_R = scale * W_R_raw
+        """
+        W_C = torch.as_tensor(W_C, dtype=torch.complex64, device=self.model_device)
+        W_R = torch.as_tensor(W_R, dtype=torch.complex64, device=self.model_device)
+
+        power = self.compute_tx_power(W_C, W_R)                       # (B,)
+        p_max = torch.as_tensor(TRANSMIT_POWER_TOTAL, dtype=power.dtype, device=self.model_device)
+
+        scale = torch.sqrt(p_max / (power + eps))                     # (B,)
+        scale = scale.view(-1, 1, 1).to(torch.complex64)              # (B,1,1)
+
+        W_C_scaled = scale * W_C
+        W_R_scaled = scale * W_R
+
+        return W_C_scaled, W_R_scaled
+
     def compute_ris_amplitude_penalty(self, theta):
         theta = torch.as_tensor(theta, dtype=torch.complex64, device=self.model_device)
         if theta.ndim == 1:

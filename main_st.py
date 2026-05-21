@@ -142,7 +142,8 @@ def forward_shortterm_regular_objective(
     流程:
         1. fixed theta_LT
         2. estimated channels -> W_C, W_R
-        3. 在 estimated channels 上計算 sum-rate、sensing penalty、tx penalty
+        3. NN 輸出 W_C, W_R 後先做 TX power scaling
+        4. 在 estimated channels 上計算 sum-rate 與 sensing penalty
 
     回傳:
         objective : torch.Tensor
@@ -162,6 +163,7 @@ def forward_shortterm_regular_objective(
 
     W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                   # shape = (B,M,K)
     W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                  # shape = (B,M,RADAR_STREAMS)
+    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)                                   # 新增 TXpower map到 TXmax
 
     sumrate_mean = comm_net.compute_sum_rate(
         h_dk=h_dk_hat,
@@ -186,24 +188,15 @@ def forward_shortterm_regular_objective(
         min=0.0
     ).mean()
 
-    tx_power = comm_net.compute_tx_power(W_C, W_R)
-
-    tx_penalty = torch.clamp(
-        tx_power - TRANSMIT_POWER_TOTAL,
-        min=0.0
-    ).mean()
-
     objective = (
         sumrate_mean
         - SENSING_LOSS_WEIGHT * snr_penalty
-        - TX_POWER_LOSS_WEIGHT * tx_penalty
     )
 
     logs = {
         "sum_rate_mean": sumrate_mean.detach(),
         "sense_snr_mean_db": (10.0 * torch.log10(sense_snr.clamp_min(1e-12))).mean().detach(),
         "snr_penalty_mean": snr_penalty.detach(),
-        "tx_penalty_mean": tx_penalty.detach(),
         "objective": objective.detach(),
     }
 
@@ -224,7 +217,7 @@ def forward_shortterm_robust_objective(
     計算 robust short-term objective。
     流程:
         1. NN 輸入使用原始 estimated channels + fixed theta_LT
-        2. 用原始 estimated channels 產生 W_C, W_R
+        2. 用原始 estimated channels 產生 W_C, W_R，並做 TX power scaling
         3. 複製 estimated channels 並加入 uncertainty injection
         4. 在 injected channels 上計算 mean sum-rate 與 VaR-SNR penalty
 
@@ -250,13 +243,8 @@ def forward_shortterm_robust_objective(
 
     W_C = comm_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                   # shape = (B,M,K)
     W_R = radar_net(h_dk_hat, h_rk_hat, G_hat, g_dt_hat, theta_batch)                  # shape = (B,M,RADAR_STREAMS)
+    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)                                   # 新增 TXpower map到 TXmax
 
-    tx_power = comm_net.compute_tx_power(W_C, W_R)
-
-    tx_penalty = torch.clamp(
-        tx_power - TRANSMIT_POWER_TOTAL,
-        min=0.0
-    ).mean()
 
     sumrate_chunks = []
     snr_chunks = []
@@ -322,14 +310,12 @@ def forward_shortterm_robust_objective(
     objective = (
         sumrate_mean
         - SENSING_LOSS_WEIGHT * snr_penalty
-        - TX_POWER_LOSS_WEIGHT * tx_penalty
     )
 
     logs = {
         "sum_rate_mean": sumrate_mean.detach(),
         "sense_var_snr_mean_db": (10.0 * torch.log10(snr_var.clamp_min(1e-12))).mean().detach(),
         "snr_penalty_mean": snr_penalty.detach(),
-        "tx_penalty_mean": tx_penalty.detach(),
         "objective": objective.detach(),
     }
 
@@ -482,7 +468,7 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
 
     n_train_layouts = train_dataset["ue_layouts"].shape[0]
 
-    for ep in trange(1, 150 + 1, desc="ShortTerm-Regular"):
+    for ep in trange(1, 1000 + 1, desc="ShortTerm-Regular"):
         comm_net.train()
         radar_net.train()
 
@@ -491,32 +477,58 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
         train_snr_db_ep = 0.0
 
         for _ in range(MINIBATCHES):
-            layout_id = int(np.random.randint(0, n_train_layouts))                    # 每次 update 抽 1 個 layout
-
-            ue_layout = train_dataset["ue_layouts"][layout_id]
-            theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
-
-            n_pool = train_dataset["st_h_dk_hat"][layout_id].shape[0]
-            channel_ids = sample_channel_ids(n_pool, BATCH_SIZE)
-
-            batch_data = extract_shortterm_batch(train_dataset, layout_id, channel_ids)
+            # 每次 update 抽 ST_BATCH_LAYOUTS 個 layouts
+            replace_layout = n_train_layouts < ST_BATCH_LAYOUTS
+            layout_ids = np.random.choice(
+                n_train_layouts,
+                size=ST_BATCH_LAYOUTS,
+                replace=replace_layout
+            )
 
             optimizer.zero_grad(set_to_none=True)
 
-            obj, logs = forward_shortterm_regular_objective(
-                comm_net=comm_net,
-                radar_net=radar_net,
-                theta_fixed=theta_fixed,
-                batch_data=batch_data,
-            )
+            mb_obj = 0.0
+            mb_sumrate = 0.0
+            mb_snr_db = 0.0
 
-            loss = -obj
-            loss.backward()
+            for layout_id in layout_ids:
+                layout_id = int(layout_id)
+
+                ue_layout = train_dataset["ue_layouts"][layout_id]
+                theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
+
+                n_pool = train_dataset["st_h_dk_hat"][layout_id].shape[0]
+                channel_ids = sample_channel_ids(
+                    n_pool,
+                    ST_BATCH_EST_CHANNELS_PER_LAYOUT
+                )
+
+                batch_data = extract_shortterm_batch(
+                    train_dataset,
+                    layout_id,
+                    channel_ids
+                )
+
+                obj, logs = forward_shortterm_regular_objective(
+                    comm_net=comm_net,
+                    radar_net=radar_net,
+                    theta_fixed=theta_fixed,
+                    batch_data=batch_data,
+                )
+
+                # 10 個 layout 的 objective 取平均後做一次 optimizer update
+                loss = -obj / ST_BATCH_LAYOUTS
+                loss.backward()
+
+                mb_obj += float(obj.detach().cpu()) / ST_BATCH_LAYOUTS
+                mb_sumrate += float(logs["sum_rate_mean"].cpu()) / ST_BATCH_LAYOUTS
+                mb_snr_db += float(logs["sense_snr_mean_db"].cpu()) / ST_BATCH_LAYOUTS
+
             optimizer.step()
 
-            train_obj_ep += float(obj.detach().cpu()) / MINIBATCHES
-            train_sumrate_ep += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
-            train_snr_db_ep += float(logs["sense_snr_mean_db"].cpu()) / MINIBATCHES
+            train_obj_ep += mb_obj / MINIBATCHES
+            train_sumrate_ep += mb_sumrate / MINIBATCHES
+            train_snr_db_ep += mb_snr_db / MINIBATCHES
 
         val_logs = validate_shortterm_regular_sampled(
             longterm_net=longterm_net,
@@ -543,6 +555,7 @@ def train_shortterm_regular(longterm_net, comm_net, radar_net, train_dataset, va
             f"TrainObj={train_obj_ep:.4e} | ValObj={val_logs['objective']:.4e} | "
             f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_logs['sum_rate_mean']:.4e} | "
             f"TrainSNR(dB)={train_snr_db_ep:.3f} | ValSNR(dB)={val_logs['sense_snr_mean_db']:.3f} | "
+            f"TrainLayouts={ST_BATCH_LAYOUTS} | TrainChannels/Layout={ST_BATCH_EST_CHANNELS_PER_LAYOUT} | "
             f"ValLayouts={val_logs['num_val_layouts']} | ValChannels={val_logs['channels_per_layout']}"
         )
 
@@ -588,33 +601,59 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
         train_snr_db_ep = 0.0
 
         for _ in range(MINIBATCHES):
-            layout_id = int(np.random.randint(0, n_train_layouts))                    # 每次 update 抽 1 個 layout
-
-            ue_layout = train_dataset["ue_layouts"][layout_id]
-            theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
-
-            n_pool = train_dataset["st_h_dk_hat"][layout_id].shape[0]
-            channel_ids = sample_channel_ids(n_pool, BATCH_SIZE)
-
-            batch_data = extract_shortterm_batch(train_dataset, layout_id, channel_ids)
+            # 每次 update 抽 ST_BATCH_LAYOUTS 個 layouts
+            replace_layout = n_train_layouts < ST_BATCH_LAYOUTS
+            layout_ids = np.random.choice(
+                n_train_layouts,
+                size=ST_BATCH_LAYOUTS,
+                replace=replace_layout
+            )
 
             optimizer.zero_grad(set_to_none=True)
 
-            obj, logs = forward_shortterm_robust_objective(
-                comm_net=comm_net,
-                radar_net=radar_net,
-                theta_fixed=theta_fixed,
-                batch_data=batch_data,
-                injection_samples=INJECTION_SAMPLES,
-            )
+            mb_obj = 0.0
+            mb_sumrate = 0.0
+            mb_snr_db = 0.0
 
-            loss = -obj
-            loss.backward()
+            for layout_id in layout_ids:
+                layout_id = int(layout_id)
+
+                ue_layout = train_dataset["ue_layouts"][layout_id]
+                theta_fixed = get_fixed_theta_from_longterm(longterm_net, ue_layout)
+
+                n_pool = train_dataset["st_h_dk_hat"][layout_id].shape[0]
+                channel_ids = sample_channel_ids(
+                    n_pool,
+                    ST_BATCH_EST_CHANNELS_PER_LAYOUT
+                )
+
+                batch_data = extract_shortterm_batch(
+                    train_dataset,
+                    layout_id,
+                    channel_ids
+                )
+
+                obj, logs = forward_shortterm_robust_objective(
+                    comm_net=comm_net,
+                    radar_net=radar_net,
+                    theta_fixed=theta_fixed,
+                    batch_data=batch_data,
+                    injection_samples=INJECTION_SAMPLES,
+                )
+
+                # 10 個 layout 的 objective 取平均後做一次 optimizer update
+                loss = -obj / ST_BATCH_LAYOUTS
+                loss.backward()
+
+                mb_obj += float(obj.detach().cpu()) / ST_BATCH_LAYOUTS
+                mb_sumrate += float(logs["sum_rate_mean"].cpu()) / ST_BATCH_LAYOUTS
+                mb_snr_db += float(logs["sense_var_snr_mean_db"].cpu()) / ST_BATCH_LAYOUTS
+
             optimizer.step()
 
-            train_obj_ep += float(obj.detach().cpu()) / MINIBATCHES
-            train_sumrate_ep += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
-            train_snr_db_ep += float(logs["sense_var_snr_mean_db"].cpu()) / MINIBATCHES
+            train_obj_ep += mb_obj / MINIBATCHES
+            train_sumrate_ep += mb_sumrate / MINIBATCHES
+            train_snr_db_ep += mb_snr_db / MINIBATCHES
 
         val_logs = validate_shortterm_robust_sampled(
             longterm_net=longterm_net,
@@ -641,6 +680,7 @@ def train_shortterm_robust(longterm_net, comm_net, radar_net, train_dataset, val
             f"TrainObj={train_obj_ep:.4e} | ValObj={val_logs['objective']:.4e} | "
             f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_logs['sum_rate_mean']:.4e} | "
             f"TrainVaR-SNR(dB)={train_snr_db_ep:.3f} | ValVaR-SNR(dB)={val_logs['sense_var_snr_mean_db']:.3f} | "
+            f"TrainLayouts={ST_BATCH_LAYOUTS} | TrainChannels/Layout={ST_BATCH_EST_CHANNELS_PER_LAYOUT} | "
             f"ValLayouts={val_logs['num_val_layouts']} | ValChannels={val_logs['channels_per_layout']}"
         )
 

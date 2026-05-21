@@ -77,7 +77,7 @@ def forward_longterm_one_layout_objective(
         1. layout -> theta_LT, W_C_LT, W_R_LT
         2. 使用該 layout 的 statistical channels
         3. 計算 layout-level mean sum-rate
-        4. 扣除 RIS amplitude penalty 與 TX power penalty
+        4. 扣除 RIS amplitude penalty
     回傳:
         objective : torch.Tensor
         logs      : dict
@@ -87,6 +87,7 @@ def forward_longterm_one_layout_objective(
     ue_layout_t = np_to_torch_float(ue_layout_np).unsqueeze(0)         # shape = (1,K,2)
 
     theta_lt, W_C_lt, W_R_lt = longterm_net(ue_layout_t)               # (1,N), (1,M,K), (1,M,RADAR_STREAMS)
+    W_C_lt, W_R_lt = longterm_net.normalize_tx_power(W_C_lt, W_R_lt)   # TX power scaling
 
     h_dk_true = np_to_torch_complex(dataset["lt_h_dk_true"][layout_id])  # shape = (S,M,K)
     h_rk_true = np_to_torch_complex(dataset["lt_h_rk_true"][layout_id])  # shape = (S,N,K)
@@ -116,26 +117,14 @@ def forward_longterm_one_layout_objective(
         theta_lt
     ).mean()
 
-    tx_power = longterm_net.compute_tx_power(
-        W_C_lt,
-        W_R_lt
-    )
-
-    tx_penalty = torch.clamp(
-        tx_power - TRANSMIT_POWER_TOTAL,
-        min=0.0
-    ).mean()
-
     objective = (
         sumrate_mean
         - RE_POWER_LOSS_WEIGHT * theta_penalty
-        - TX_POWER_LOSS_WEIGHT * tx_penalty
     )
 
     logs = {
         "sum_rate_mean": sumrate_mean.detach(),
         "theta_penalty_mean": theta_penalty.detach(),
-        "tx_penalty_mean": tx_penalty.detach(),
         "objective": objective.detach(),
         "layout_id": layout_id,
         "num_statistical_channels": S,
@@ -170,7 +159,6 @@ def validate_longterm_sampled(
     total_obj = 0.0
     total_sumrate = 0.0
     total_theta_pen = 0.0
-    total_tx_pen = 0.0
 
     for layout_id in layout_ids:
         obj_t, logs = forward_longterm_one_layout_objective(
@@ -182,13 +170,11 @@ def validate_longterm_sampled(
         total_obj += float(obj_t.detach().cpu())
         total_sumrate += float(logs["sum_rate_mean"].cpu())
         total_theta_pen += float(logs["theta_penalty_mean"].cpu())
-        total_tx_pen += float(logs["tx_penalty_mean"].cpu())
 
     return {
         "objective": total_obj / num_val_layouts,
         "sum_rate_mean": total_sumrate / num_val_layouts,
         "theta_penalty_mean": total_theta_pen / num_val_layouts,
-        "tx_penalty_mean": total_tx_pen / num_val_layouts,
         "num_val_layouts": num_val_layouts,
     }
 
@@ -220,7 +206,6 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
         train_obj_ep = 0.0
         train_sumrate_ep = 0.0
         train_theta_pen_ep = 0.0
-        train_tx_pen_ep = 0.0
 
         for _ in range(MINIBATCHES):
             layout_id = int(np.random.randint(0, n_train_layouts))       # 每次 update 只抽 1 個 layout
@@ -240,7 +225,6 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
             train_obj_ep += float(obj.detach().cpu()) / MINIBATCHES
             train_sumrate_ep += float(logs["sum_rate_mean"].cpu()) / MINIBATCHES
             train_theta_pen_ep += float(logs["theta_penalty_mean"].cpu()) / MINIBATCHES
-            train_tx_pen_ep += float(logs["tx_penalty_mean"].cpu()) / MINIBATCHES
 
         val_logs = validate_longterm_sampled(
             longterm_net=longterm_net,
@@ -251,7 +235,6 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
         val_obj_ep = val_logs["objective"]
         val_sumrate_ep = val_logs["sum_rate_mean"]
         val_theta_pen_ep = val_logs["theta_penalty_mean"]
-        val_tx_pen_ep = val_logs["tx_penalty_mean"]
 
         curves.append([
             train_obj_ep,
@@ -260,8 +243,6 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
             val_sumrate_ep,
             train_theta_pen_ep,
             val_theta_pen_ep,
-            train_tx_pen_ep,
-            val_tx_pen_ep,
         ])
 
         np.save(curve_path, np.array(curves, dtype=np.float32))
@@ -271,7 +252,6 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
             f"TrainObj={train_obj_ep:.4e} | ValObj={val_obj_ep:.4e} | "
             f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_sumrate_ep:.4e} | "
             f"TrainThetaPen={train_theta_pen_ep:.4e} | ValThetaPen={val_theta_pen_ep:.4e} | "
-            f"TrainTxPen={train_tx_pen_ep:.4e} | ValTxPen={val_tx_pen_ep:.4e} | "
             f"ValLayouts={val_logs['num_val_layouts']}"
         )
 
