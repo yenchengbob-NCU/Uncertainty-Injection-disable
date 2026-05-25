@@ -1,0 +1,36 @@
+====================================================
+[EVAL6 Non-CDF Summary]
+EVAL6_TAG = REG100_ROB0p5_INJ0p075
+EVAL_INJECTION_VARIANCE = 0.075
+EVAL_INJECTION_SAMPLES = 200
+EVAL_THRESHOLD = 15.0 dB
+====================================================
+
+[REG]
+  sample violation count = 207,386 / 5,000,000
+  sample violation prob  = 4.148 %
+  feasible pairs         = 18,038 / 25,000
+  feasible ratio         = 72.152 %
+  mean SumRate           = 9.543710 bits/s/Hz
+  mean Q0.05 SumRate     = 8.776185 bits/s/Hz
+  mean min SumRate       = 8.071591 bits/s/Hz
+  mean Q0.05 SNR         = 15.670 dB
+
+[ROB]
+  sample violation count = 140,576 / 5,000,000
+  sample violation prob  = 2.812 %
+  feasible pairs         = 21,490 / 25,000
+  feasible ratio         = 85.960 %
+  mean SumRate           = 9.799395 bits/s/Hz
+  mean Q0.05 SumRate     = 9.110930 bits/s/Hz
+  mean min SumRate       = 8.492973 bits/s/Hz
+  mean Q0.05 SNR         = 15.709 dB
+
+[Paired dominance ratios]
+  ROB higher E[SumRate] = 56.444 %
+  ROB higher Q0.05(SumRate) = 56.560 %
+  ROB higher min SumRate = 56.520 %
+  ROB lower violation probability = 49.796 %
+  ROB higher Q0.05(SNR) = 53.476 %
+  ROB higher E[SumRate] and lower violation = 26.496 %
+  ROB higher Q0.05(SumRate) and lower violation = 26.576 %

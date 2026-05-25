@@ -10,11 +10,6 @@ from tqdm import trange
 from settings import *
 from neural_net import LongTermPositionNet
 
-# ================================
-# Long-term validation config
-# ================================
-LT_VAL_LAYOUTS_PER_EPOCH = N_VAL_LAYOUTS                  # 每個 epoch 從 validation pool 抽幾個 layouts 驗證
-
 
 # ================================
 # Helpers
@@ -29,15 +24,11 @@ def np_to_torch_float(x_np: np.ndarray) -> torch.Tensor:
 
 def load_longterm_dataset(npz_path: str, dataset_name: str):
     """
-    載入  long-term 訓練需要的 dataset 欄位。
-    回傳: dataset : dict
-    """
-    if not os.path.exists(npz_path):
-        raise FileNotFoundError(
-            f"[{dataset_name}] 找不到 dataset 檔案：{npz_path}\n"
-            f"請先執行 rician.py 生成固定 dataset。"
-        )
+    載入 long-term 訓練需要的 dataset 欄位。
 
+    回傳:
+        dataset : dict
+    """
     required_keys = [
         "ue_layouts",
         "pl_BS_UE",
@@ -48,10 +39,6 @@ def load_longterm_dataset(npz_path: str, dataset_name: str):
     ]
 
     with np.load(npz_path) as data:
-        for key in required_keys:
-            if key not in data:
-                raise KeyError(f"[{dataset_name}] dataset 缺少欄位：{key}")
-
         dataset = {key: data[key] for key in required_keys}
 
     print(f"[{dataset_name}] loaded: {npz_path}")
@@ -63,6 +50,20 @@ def load_longterm_dataset(npz_path: str, dataset_name: str):
     return dataset
 
 
+def moving_average(x: np.ndarray, window: int):
+    """
+    計算 moving average。
+
+    輸入:
+        x      : 1D numpy array
+        window : moving average window size
+
+    回傳:
+        x_ma : moving averaged array
+    """
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(x, kernel, mode="valid")
+
 # ================================
 # Long-term objective
 # ================================
@@ -72,35 +73,36 @@ def forward_longterm_one_layout_objective(
     layout_id: int,
 ):
     """
-    計算單一 layout 的 long-term objective
+    計算單一 layout 的 long-term objective。
+
     流程:
         1. layout -> theta_LT, W_C_LT, W_R_LT
         2. 使用該 layout 的 statistical channels
         3. 計算 layout-level mean sum-rate
         4. 扣除 RIS amplitude penalty
+
     回傳:
         objective : torch.Tensor
         logs      : dict
     """
+    ue_layout_np = dataset["ue_layouts"][layout_id]                     # shape = (K,2)
+    ue_layout_t = np_to_torch_float(ue_layout_np).unsqueeze(0)          # shape = (1,K,2)
 
-    ue_layout_np = dataset["ue_layouts"][layout_id]                    # shape = (K,2)
-    ue_layout_t = np_to_torch_float(ue_layout_np).unsqueeze(0)         # shape = (1,K,2)
+    theta_lt, W_C_lt, W_R_lt = longterm_net(ue_layout_t)                # (1,N), (1,M,K), (1,M,RADAR_STREAMS)
+    W_C_lt, W_R_lt = longterm_net.normalize_tx_power(W_C_lt, W_R_lt)    # TX power scaling
 
-    theta_lt, W_C_lt, W_R_lt = longterm_net(ue_layout_t)               # (1,N), (1,M,K), (1,M,RADAR_STREAMS)
-    W_C_lt, W_R_lt = longterm_net.normalize_tx_power(W_C_lt, W_R_lt)   # TX power scaling
+    h_dk_true = np_to_torch_complex(dataset["lt_h_dk_true"][layout_id]) # shape = (S,M,K)
+    h_rk_true = np_to_torch_complex(dataset["lt_h_rk_true"][layout_id]) # shape = (S,N,K)
+    G_true    = np_to_torch_complex(dataset["lt_G_true"][layout_id])    # shape = (S,N,M)
 
-    h_dk_true = np_to_torch_complex(dataset["lt_h_dk_true"][layout_id])  # shape = (S,M,K)
-    h_rk_true = np_to_torch_complex(dataset["lt_h_rk_true"][layout_id])  # shape = (S,N,K)
-    G_true    = np_to_torch_complex(dataset["lt_G_true"][layout_id])     # shape = (S,N,M)
+    pl_BS_UE     = dataset["pl_BS_UE"][layout_id]                       # shape = (K,)
+    pl_BS_RIS_UE = dataset["pl_BS_RIS_UE"][layout_id]                   # shape = (K,)
 
-    pl_BS_UE     = dataset["pl_BS_UE"][layout_id]                      # shape = (K,)
-    pl_BS_RIS_UE = dataset["pl_BS_RIS_UE"][layout_id]                  # shape = (K,)
+    S = h_dk_true.shape[0]                                              # statistical channels 數量
 
-    S = h_dk_true.shape[0]                                             # statistical channels 數量
-
-    theta_rep = theta_lt.expand(S, RIS_UNIT)                           # shape = (S,N)
-    W_C_rep   = W_C_lt.expand(S, TX_ANT, UAV_COMM)                     # shape = (S,M,K)
-    W_R_rep   = W_R_lt.expand(S, TX_ANT, RADAR_STREAMS)                # shape = (S,M,RADAR_STREAMS)
+    theta_rep = theta_lt.expand(S, RIS_UNIT)                            # shape = (S,N)
+    W_C_rep   = W_C_lt.expand(S, TX_ANT, UAV_COMM)                      # shape = (S,M,K)
+    W_R_rep   = W_R_lt.expand(S, TX_ANT, RADAR_STREAMS)                 # shape = (S,M,RADAR_STREAMS)
 
     sumrate_mean = longterm_net.compute_sum_rate(
         h_dk=h_dk_true,
@@ -151,10 +153,11 @@ def validate_longterm_sampled(
     longterm_net.eval()
 
     n_val_pool = val_dataset["ue_layouts"].shape[0]
-    num_val_layouts = min(num_val_layouts, n_val_pool)
-
-    replace = n_val_pool < num_val_layouts                              # pool 不足時允許重複抽樣
-    layout_ids = np.random.choice(n_val_pool, size=num_val_layouts, replace=replace)
+    layout_ids = np.random.choice(
+        n_val_pool,
+        size=num_val_layouts,
+        replace=False
+    )
 
     total_obj = 0.0
     total_sumrate = 0.0
@@ -191,16 +194,22 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
         2. 每次 update 只抽 1 個 train layout
         3. 該 layout 使用所有 LT statistical channels 計算 objective
     """
-    optimizer = optim.Adam(longterm_net.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(
+        longterm_net.parameters(),
+        lr=LT_LEARNING_RATE
+    )
 
     best_val_obj = -np.inf
     curves = []
 
-    curve_path = os.path.join(CURVE_DIR, f"longterm_curves_{SETTING_STRING}.npy")
+    curve_path = os.path.join(
+        CURVE_DIR,
+        f"longterm_curves_{SETTING_STRING}.npy"
+    )
 
     n_train_layouts = train_dataset["ue_layouts"].shape[0]
 
-    for ep in trange(1, EPOCHS + 1, desc="LongTerm"):
+    for ep in trange(1, LT_EPOCHS + 1, desc="LongTerm"):
         longterm_net.train()
 
         train_obj_ep = 0.0
@@ -229,7 +238,7 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
         val_logs = validate_longterm_sampled(
             longterm_net=longterm_net,
             val_dataset=val_dataset,
-            num_val_layouts=LT_VAL_LAYOUTS_PER_EPOCH,
+            num_val_layouts=N_VAL_LAYOUTS,
         )
 
         val_obj_ep = val_logs["objective"]
@@ -248,11 +257,13 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
         np.save(curve_path, np.array(curves, dtype=np.float32))
 
         print(
-            f"[LongTerm Epoch {ep:03d}] "
-            f"TrainObj={train_obj_ep:.4e} | ValObj={val_obj_ep:.4e} | "
-            f"TrainSumRate={train_sumrate_ep:.4e} | ValSumRate={val_sumrate_ep:.4e} | "
-            f"TrainThetaPen={train_theta_pen_ep:.4e} | ValThetaPen={val_theta_pen_ep:.4e} | "
-            f"ValLayouts={val_logs['num_val_layouts']}"
+            f"[LT Epoch {ep:03d}/{LT_EPOCHS}]\n"
+            f"  TrainObj      = {train_obj_ep:.4e} | "
+            f"TrainSumRate  = {train_sumrate_ep:.4e} | "
+            f"TrainThetaPen = {train_theta_pen_ep:.4e} |\n"
+            f"  ValObj        = {val_obj_ep:.4e} | "
+            f"ValSumRate    = {val_sumrate_ep:.4e} | "
+            f"ValThetaPen   = {val_theta_pen_ep:.4e} |"
         )
 
         if val_obj_ep > best_val_obj:
@@ -262,24 +273,71 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
     print(f"[LongTerm] best ValObj = {best_val_obj:.4e}")
     longterm_net.load_model(verbose=True)
 
+
 # ================================
 # Plot long-term objective curve
 # ================================
 def plot_longterm_objective_curve():
-    curve_path = os.path.join(CURVE_DIR,f"longterm_curves_{SETTING_STRING}.npy")
+    curve_path = os.path.join(
+        CURVE_DIR,
+        f"longterm_curves_{SETTING_STRING}.npy"
+    )
+
     curves = np.load(curve_path)
+
     # 跳過 epoch 1，避免初期 objective 過低壓縮後期曲線
     start_idx = 1
+
     epochs = np.arange(start_idx + 1, curves.shape[0] + 1)
 
     train_obj = curves[start_idx:, 0]
-    val_obj = curves[start_idx:, 1]
+    val_obj   = curves[start_idx:, 1]
 
-    fig_path = os.path.join(CURVE_DIR,f"longterm_objective_curve_{SETTING_STRING}.jpg")
+    window = PLOT_MOVING_AVG_WINDOW
 
-    plt.figure(figsize=(8, 5))
-    plt.plot(epochs, train_obj, label="Train Objective")
-    plt.plot(epochs, val_obj, label="Validation Objective")
+    train_obj_ma = moving_average(train_obj, window)
+    val_obj_ma   = moving_average(val_obj, window)
+
+    ma_epochs = epochs[window - 1:]
+
+    fig_path = os.path.join(
+        CURVE_DIR,
+        f"longterm_objective_curve_{SETTING_STRING}.jpg"
+    )
+
+    plt.figure(figsize=(9, 5.5))
+
+    # raw curves
+    plt.plot(
+        epochs,
+        train_obj,
+        label="Train Objective",
+        alpha=0.35,
+        linewidth=1.0
+    )
+
+    plt.plot(
+        epochs,
+        val_obj,
+        label="Validation Objective",
+        alpha=0.35,
+        linewidth=1.0
+    )
+
+    # moving average curves
+    plt.plot(
+        ma_epochs,
+        train_obj_ma,
+        label=f"Train Objective MA({window})",
+        linewidth=2.2
+    )
+
+    plt.plot(
+        ma_epochs,
+        val_obj_ma,
+        label=f"Validation Objective MA({window})",
+        linewidth=2.2
+    )
 
     plt.xlabel("Epoch")
     plt.ylabel("Objective")
@@ -289,21 +347,17 @@ def plot_longterm_objective_curve():
     plt.tight_layout()
 
     plt.savefig(fig_path, format="jpg", dpi=300)
-    print(f"[PLOT] 已儲存 long-term objective curve：{fig_path}")
+    print(f"[PLOT] 已儲存 long-term objective curve : {fig_path}")
 
     plt.show()
     plt.close()
+
 
 # ================================
 # Main
 # ================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train long-term network only")
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="若已存在 long-term ckpt，則先載入再繼續訓練"
-    )
     parser.add_argument(
         "--plot",
         action="store_true",
@@ -317,16 +371,16 @@ if __name__ == "__main__":
 
     print("[INFO] 載入固定 datasets ...")
 
-    train_dataset = load_longterm_dataset(TRAIN_DATASET_PATH, "train")
-    val_dataset   = load_longterm_dataset(VAL_DATASET_PATH, "val")
+    train_dataset = load_longterm_dataset(TRAIN_DATASET_PATH,"train")
+
+    val_dataset = load_longterm_dataset(VAL_DATASET_PATH,"val")
 
     longterm_net = LongTermPositionNet(ckpt_kind="longterm").to(DEVICE)
 
-    if args.resume and longterm_net.model_path and os.path.exists(longterm_net.model_path):
-        print(f"[INFO] resume from ckpt: {longterm_net.model_path}")
-        longterm_net.load_model(verbose=True)
-
     print("[INFO] 開始 long-term 訓練 ...")
+    print(f"[INFO] LT_EPOCHS = {LT_EPOCHS}")
+    print(f"[INFO] MINIBATCHES = {MINIBATCHES}")
+    print(f"[INFO] LT_LEARNING_RATE = {LT_LEARNING_RATE}")
     print("[INFO] Training rule: one minibatch = one layout objective.")
 
     train_longterm(

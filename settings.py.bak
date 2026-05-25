@@ -46,8 +46,8 @@ TRANSMIT_POWER_TOTAL = 1.0
 SENSING_SNR_THRESHOLD_dB = 15
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)
 
-REG_SENSING_LOSS_WEIGHT = 200.0
-ROB_SENSING_LOSS_WEIGHT = 0.5
+REG_SENSING_LOSS_WEIGHT = 50.0
+ROB_SENSING_LOSS_WEIGHT = 5.0
 RE_POWER_LOSS_WEIGHT = 250.0
 
 # ================================
@@ -126,7 +126,7 @@ TEST_UE_LAYOUTS  = layout_gen(N_TEST_LAYOUTS)   # fixed test layouts
 # ================================
 # Robust / uncertainty injection
 # ================================
-INJECTION_VARIANCE = 0.075
+INJECTION_VARIANCE = 0.095
 INJECTION_SAMPLES  = 200
 OUTAGE_QUANTILE    = 0.05
 
@@ -134,7 +134,7 @@ OUTAGE_QUANTILE    = 0.05
 # 訓練 / 驗證 / 測試
 # ================================
 LT_EPOCHS   = 400
-REG_EPOCHS  = 500
+REG_EPOCHS  = 600
 ROB_EPOCHS  = 1200
 
 MINIBATCHES = 50

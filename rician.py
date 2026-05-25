@@ -15,10 +15,6 @@ def normalize_ue_layout(ue_layout):
     回傳: np.ndarray, shape=(UAV_COMM, 2)
     """
     ue_layout = np.asarray(ue_layout, dtype=np.float32)
-    if ue_layout.shape != (UAV_COMM, 2):
-        raise ValueError(
-            f"ue_layout shape 應為 ({UAV_COMM}, 2)，目前收到 {ue_layout.shape}"
-        )
     return ue_layout
 
 
@@ -34,17 +30,12 @@ def theta_calculater(p1, p2, normal):
         "-Y": np.array([ 0.0, -1.0], dtype=float),
     }
 
-    if normal not in normal_map:
-        raise ValueError(f"unknown normal = {normal}")
-
     p1 = np.asarray(p1, dtype=float)
     p2 = np.asarray(p2, dtype=float)
 
     n_hat = normal_map[normal]
     v = p2 - p1
     d = np.linalg.norm(v)
-    if d <= 1e-12:
-        raise ValueError("p1 and p2 are too close; angle is undefined.")
 
     u_hat = v / d
 
