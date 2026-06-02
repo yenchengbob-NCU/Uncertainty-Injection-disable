@@ -24,10 +24,24 @@ EVAL_CHANNELS_PER_LAYOUT = None
 REG_PENALTY_LIST = [70, 100, 150, 200, 300]
 ROB_PENALTY_LIST = [0.025, 0.05, 0.1, 0.5, 1]
 
-INJECTION_SWEEP_LIST = [0.0, 0.025, 0.050, 0.075, 0.100, 0.125, 0.150, 0.175, 0.200, 0.225, 0.250]
+INJECTION_SWEEP_LIST = [ 0.0, 0.025, 0.050, 0.075, 0.100, 0.125, 0.150, 0.175, 0.200, 0.225, 0.250]
 
 OUTAGE_PROB_THRESHOLD = 0.05
 EVAL_SEED = RANDOM_SEED + 777
+
+# ================================
+# Injected-channel power normalization
+# ================================
+# True:
+#   對 sweep evaluation 中的 injected channels 做 power normalization，
+#   讓 h_hat + error 的 norm / Frobenius norm 回到 h_hat 的 power。
+#   目的：避免 test injection variance 增大時，因 additive Gaussian error
+#   額外增加 channel power，導致 mean sum-rate 反直覺上升。
+#
+# False:
+#   保持原本 additive Gaussian injection，不做 normalization。
+POWER_NORMALIZE_INJECTED_CHANNELS = True
+POWER_NORM_EPS = 1e-12
 
 
 # ================================
@@ -153,6 +167,104 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
     ) * sigma
 
     return torch.complex(nr, ni).to(dtype=cdtype)
+
+
+
+def normalize_injected_channel_power(
+    injected: torch.Tensor,
+    reference: torch.Tensor,
+    norm_dims,
+    eps: float = POWER_NORM_EPS,
+) -> torch.Tensor:
+    """
+    將 injected channel 的 power 正規化回 reference channel。
+
+    對 vector channel：
+        h_inj_norm = h_inj * ||h_ref|| / ||h_inj||
+
+    對 matrix channel：
+        G_inj_norm = G_inj * ||G_ref||_F / ||G_inj||_F
+
+    這裡的 norm_dims 決定要在哪些維度上計算 norm。
+    第一個 batch 維度不應該被包含在 norm_dims 裡。
+
+    目的：
+        保留 estimated channel 的 large-scale power，
+        讓 injection 主要代表 channel direction / phase perturbation，
+        避免 additive Gaussian error 額外增加平均 channel power。
+    """
+    ref_norm = torch.linalg.vector_norm(
+        reference,
+        ord=2,
+        dim=norm_dims,
+        keepdim=True,
+    )
+
+    inj_norm = torch.linalg.vector_norm(
+        injected,
+        ord=2,
+        dim=norm_dims,
+        keepdim=True,
+    ).clamp_min(eps)
+
+    return injected * (ref_norm / inj_norm)
+
+
+def apply_power_normalization_to_injected_channels(
+    h_dk_inj: torch.Tensor,
+    h_rk_inj: torch.Tensor,
+    G_inj: torch.Tensor,
+    g_dt_inj: torch.Tensor,
+    h_dk_ref: torch.Tensor,
+    h_rk_ref: torch.Tensor,
+    G_ref: torch.Tensor,
+    g_dt_ref: torch.Tensor,
+):
+    """
+    對四種 injected channels 做 large-scale power preserving normalization。
+
+    Shape convention:
+        h_dk : (B*L, TX_ANT, K)
+               每個 UE 的 direct channel vector 各自保留 norm。
+        h_rk : (B*L, RIS_UNIT, K)
+               每個 UE 的 RIS-user channel vector 各自保留 norm。
+        G    : (B*L, RIS_UNIT, TX_ANT) 或目前程式中的 (B*L, N, M)
+               每個 sample 的 BS-RIS matrix 保留 Frobenius norm。
+        g_dt : (B*L, TX_ANT, 1) 或目前 dataset 中的 target channel vector
+               每個 sample 的 sensing target vector 保留 norm。
+    """
+    if not POWER_NORMALIZE_INJECTED_CHANNELS:
+        return h_dk_inj, h_rk_inj, G_inj, g_dt_inj
+
+    # h_dk / h_rk：對每個 user k 的 channel vector 分別正規化。
+    # shape = (batch, antenna_or_ris, K)，所以 norm_dims=1。
+    h_dk_inj = normalize_injected_channel_power(
+        injected=h_dk_inj,
+        reference=h_dk_ref,
+        norm_dims=1,
+    )
+
+    h_rk_inj = normalize_injected_channel_power(
+        injected=h_rk_inj,
+        reference=h_rk_ref,
+        norm_dims=1,
+    )
+
+    # G：matrix channel，對每個 sample 的整個 matrix 做 Frobenius norm normalization。
+    G_inj = normalize_injected_channel_power(
+        injected=G_inj,
+        reference=G_ref,
+        norm_dims=(1, 2),
+    )
+
+    # g_dt：target channel vector，最後一維通常是 1，所以對 channel 維度一起取 norm。
+    g_dt_inj = normalize_injected_channel_power(
+        injected=g_dt_inj,
+        reference=g_dt_ref,
+        norm_dims=(1, 2),
+    )
+
+    return h_dk_inj, h_rk_inj, G_inj, g_dt_inj
 
 
 def reset_eval_seed():
@@ -542,6 +654,17 @@ def eval_one_batch_under_injection(
             test_injection_variance,
             DEVICE,
             g_dt_rep.dtype
+        )
+
+        h_dk_inj, h_rk_inj, G_inj, g_dt_inj = apply_power_normalization_to_injected_channels(
+            h_dk_inj=h_dk_inj,
+            h_rk_inj=h_rk_inj,
+            G_inj=G_inj,
+            g_dt_inj=g_dt_inj,
+            h_dk_ref=h_dk_rep,
+            h_rk_ref=h_rk_rep,
+            G_ref=G_rep,
+            g_dt_ref=g_dt_rep,
         )
 
         theta_rep = theta_batch.unsqueeze(1).expand(
@@ -1106,6 +1229,7 @@ def plot_tradeoff_rate_q05snr(
 if __name__ == "__main__":
     print("[INFO] Eval2 started.")
     print(f"[INFO] DEVICE = {DEVICE}")
+    print(f"[INFO] POWER_NORMALIZE_INJECTED_CHANNELS = {POWER_NORMALIZE_INJECTED_CHANNELS}")
 
     eval1_dir = build_eval1_dir()
     eval2_dir = build_eval2_dir()

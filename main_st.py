@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import math
+import json
 import argparse
 import numpy as np
 import torch
@@ -36,6 +37,118 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
     nr = torch.randn(shape, device=device, dtype=torch.float32) * sigma
     ni = torch.randn(shape, device=device, dtype=torch.float32) * sigma
     return torch.complex(nr, ni).to(dtype=cdtype)
+
+
+def format_float_for_path(value: float) -> str:
+    """
+    將 float 轉成適合資料夾名稱的字串。
+
+    例：
+        0.125 -> 0p125
+        0.5   -> 0p5
+        1.0   -> 1p0
+        200.0 -> 200
+    """
+    value = float(value)
+
+    if value.is_integer():
+        return str(int(value))
+
+    text = str(value)
+    text = text.replace(".", "p")
+    text = text.replace("-", "m")
+    return text
+
+
+def build_st_paths(mode: str, penalty: float):
+    """
+    根據 mode 與 penalty 建立 ST run 的所有輸出路徑。
+
+    REG:
+        ST_sweep/REG_penalty_200/
+
+    ROB:
+        ST_sweep/ROB_penalty_0p5/
+    """
+    mode = mode.lower()
+
+    if mode not in ("reg", "rob"):
+        raise ValueError(f"mode 必須是 'reg' 或 'rob'，收到：{mode}")
+
+    penalty_tag = format_float_for_path(penalty)
+
+    if mode == "reg":
+        run_name = f"REG_penalty_{penalty_tag}"
+        comm_ckpt_name = "short_comm.ckpt"
+        radar_ckpt_name = "short_radar.ckpt"
+        curve_name = "shortterm_regular_curves.npy"
+        curve_fig_name = "shortterm_regular_objective_curve.jpg"
+        state_name = "shortterm_regular_train_state.pt"
+    else:
+        run_name = f"ROB_penalty_{penalty_tag}"
+        comm_ckpt_name = "short_comm_robust.ckpt"
+        radar_ckpt_name = "short_radar_robust.ckpt"
+        curve_name = "shortterm_robust_curves.npy"
+        curve_fig_name = "shortterm_robust_objective_curve.jpg"
+        state_name = "shortterm_robust_train_state.pt"
+
+    run_dir = os.path.join(ST_SWEEP_DIR, run_name)
+    ckpt_dir = os.path.join(run_dir, "ckpt")
+    curve_dir = os.path.join(run_dir, "training_curves")
+    state_dir = os.path.join(run_dir, "train_state")
+
+    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(ckpt_dir, exist_ok=True)
+    os.makedirs(curve_dir, exist_ok=True)
+    os.makedirs(state_dir, exist_ok=True)
+
+    return {
+        "run_dir": run_dir,
+        "ckpt_dir": ckpt_dir,
+        "curve_dir": curve_dir,
+        "state_dir": state_dir,
+        "comm_ckpt_path": os.path.join(ckpt_dir, comm_ckpt_name),
+        "radar_ckpt_path": os.path.join(ckpt_dir, radar_ckpt_name),
+        "curve_path": os.path.join(curve_dir, curve_name),
+        "curve_fig_path": os.path.join(curve_dir, curve_fig_name),
+        "state_path": os.path.join(state_dir, state_name),
+        "config_path": os.path.join(run_dir, "config.json"),
+    }
+
+
+def save_run_config(
+    paths: dict,
+    mode: str,
+    penalty: float,
+    train_injection_variance: float,
+    injection_samples: int,
+):
+    """
+    儲存本次 ST run 的設定，方便後續 eval 與檢查。
+    """
+    config = {
+        "mode": mode,
+        "sensing_penalty": float(penalty),
+        "train_injection_variance": float(train_injection_variance),
+        "injection_samples": int(injection_samples),
+        "outage_quantile": float(OUTAGE_QUANTILE),
+        "noise_power": float(NOISE_POWER),
+        "tx_power": float(TRANSMIT_POWER_TOTAL),
+        "sensing_snr_threshold_db": float(SENSING_SNR_THRESHOLD_dB),
+        "sensing_snr_threshold_linear": float(SENSING_SNR_THRESHOLD),
+        "train_dataset_path": TRAIN_DATASET_PATH,
+        "val_dataset_path": VAL_DATASET_PATH,
+        "longterm_ckpt_path": LONGTERM_CKPT_PATH,
+        "comm_ckpt_path": paths["comm_ckpt_path"],
+        "radar_ckpt_path": paths["radar_ckpt_path"],
+        "curve_path": paths["curve_path"],
+        "state_path": paths["state_path"],
+    }
+
+    with open(paths["config_path"], "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+
+    print(f"[CONFIG] 已儲存 run config：{paths['config_path']}")
 
 
 def load_shortterm_dataset(npz_path: str, split_name: str):
@@ -93,7 +206,7 @@ def get_fixed_theta_from_longterm(
     longterm_net.eval()
 
     with torch.no_grad():
-        layout_t = np_to_torch_float(ue_layout_np).unsqueeze(0)  # shape = (1,K,2)
+        layout_t = np_to_torch_float(ue_layout_np).unsqueeze(0)
         theta_lt, _, _ = longterm_net(layout_t)
 
     return theta_lt.detach()
@@ -109,26 +222,26 @@ def extract_shortterm_batch(
         1. 指定 layout 的 ue_layout 與 path loss
         2. 該 layout 底下指定 channel ids 的 estimated channels
     """
-    ue_layout = dataset["ue_layouts"][layout_id]                  # shape = (K,2)
-    pl_BS_UE = dataset["pl_BS_UE"][layout_id]                    # shape = (K,)
-    pl_BS_RIS_UE = dataset["pl_BS_RIS_UE"][layout_id]            # shape = (K,)
-    pl_BS_TAR_BS = dataset["pl_BS_TAR_BS"][layout_id]            # scalar
+    ue_layout = dataset["ue_layouts"][layout_id]
+    pl_BS_UE = dataset["pl_BS_UE"][layout_id]
+    pl_BS_RIS_UE = dataset["pl_BS_RIS_UE"][layout_id]
+    pl_BS_TAR_BS = dataset["pl_BS_TAR_BS"][layout_id]
 
     h_dk_hat = np_to_torch_complex(
         dataset["st_h_dk_hat"][layout_id][channel_ids]
-    )                                                           # shape = (B,M,K)
+    )
 
     h_rk_hat = np_to_torch_complex(
         dataset["st_h_rk_hat"][layout_id][channel_ids]
-    )                                                           # shape = (B,N,K)
+    )
 
     G_hat = np_to_torch_complex(
         dataset["st_G_hat"][layout_id][channel_ids]
-    )                                                           # shape = (B,N,M)
+    )
 
     g_dt_hat = np_to_torch_complex(
         dataset["st_g_dt_hat"][layout_id][channel_ids]
-    )                                                           # shape = (B,M,1)
+    )
 
     return {
         "ue_layout": ue_layout,
@@ -157,13 +270,6 @@ def moving_average(x: np.ndarray, window: int):
     return np.convolve(x, kernel, mode="valid")
 
 
-def build_st_train_state_path(kind: str):
-    return os.path.join(
-        CKPT_DIR,
-        f"{kind}_train_state_{SETTING_STRING}.pt"
-    )
-
-
 def save_training_state(
     state_path: str,
     comm_net,
@@ -190,6 +296,11 @@ def load_training_state(
     radar_net,
     optimizer,
 ):
+    if not os.path.exists(state_path):
+        raise FileNotFoundError(
+            f"找不到 training state，無法 resume：{state_path}"
+        )
+
     checkpoint = torch.load(
         state_path,
         map_location=DEVICE
@@ -204,6 +315,7 @@ def load_training_state(
 
     return best_val_obj, finished_epoch
 
+
 # ================================
 # Short-term regular objective
 # ================================
@@ -212,6 +324,7 @@ def forward_shortterm_regular_objective(
     radar_net: ShortTermRadarNet,
     theta_fixed: torch.Tensor,
     batch_data: dict,
+    sensing_loss_weight: float,
 ):
     """
     計算 regular short-term objective。
@@ -236,7 +349,7 @@ def forward_shortterm_regular_objective(
     pl_BS_TAR_BS = batch_data["pl_BS_TAR_BS"]
 
     B = h_dk_hat.shape[0]
-    theta_batch = theta_fixed.expand(B, RIS_UNIT)                     # shape = (B,N)
+    theta_batch = theta_fixed.expand(B, RIS_UNIT)
 
     W_C = comm_net(
         h_dk_hat,
@@ -244,7 +357,7 @@ def forward_shortterm_regular_objective(
         G_hat,
         g_dt_hat,
         theta_batch
-    )                                                                 # shape = (B,M,K)
+    )
 
     W_R = radar_net(
         h_dk_hat,
@@ -252,9 +365,9 @@ def forward_shortterm_regular_objective(
         G_hat,
         g_dt_hat,
         theta_batch
-    )                                                                 # shape = (B,M,RADAR_STREAMS)
+    )
 
-    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)                  # TX power scaling
+    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)
 
     sumrate_mean = comm_net.compute_sum_rate(
         h_dk=h_dk_hat,
@@ -281,7 +394,7 @@ def forward_shortterm_regular_objective(
 
     objective = (
         sumrate_mean
-        - REG_SENSING_LOSS_WEIGHT * snr_penalty
+        - sensing_loss_weight * snr_penalty
     )
 
     logs = {
@@ -304,7 +417,9 @@ def forward_shortterm_robust_objective(
     radar_net: ShortTermRadarNet,
     theta_fixed: torch.Tensor,
     batch_data: dict,
+    sensing_loss_weight: float,
     injection_samples: int,
+    train_injection_variance: float,
 ):
     """
     計算 robust short-term objective。
@@ -333,7 +448,7 @@ def forward_shortterm_robust_objective(
     N = h_rk_hat.shape[1]
     L = int(injection_samples)
 
-    theta_batch = theta_fixed.expand(B, RIS_UNIT)                     # shape = (B,N)
+    theta_batch = theta_fixed.expand(B, RIS_UNIT)
 
     W_C = comm_net(
         h_dk_hat,
@@ -341,7 +456,7 @@ def forward_shortterm_robust_objective(
         G_hat,
         g_dt_hat,
         theta_batch
-    )                                                                 # shape = (B,M,K)
+    )
 
     W_R = radar_net(
         h_dk_hat,
@@ -349,9 +464,9 @@ def forward_shortterm_robust_objective(
         G_hat,
         g_dt_hat,
         theta_batch
-    )                                                                 # shape = (B,M,RADAR_STREAMS)
+    )
 
-    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)                  # TX power scaling
+    W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)
 
     sumrate_chunks = []
     snr_chunks = []
@@ -377,28 +492,28 @@ def forward_shortterm_robust_objective(
 
         h_dk_inj = h_dk_rep + complex_awgn(
             h_dk_rep.shape,
-            INJECTION_VARIANCE,
+            train_injection_variance,
             DEVICE,
             h_dk_rep.dtype
         )
 
         h_rk_inj = h_rk_rep + complex_awgn(
             h_rk_rep.shape,
-            INJECTION_VARIANCE,
+            train_injection_variance,
             DEVICE,
             h_rk_rep.dtype
         )
 
         G_inj = G_rep + complex_awgn(
             G_rep.shape,
-            INJECTION_VARIANCE,
+            train_injection_variance,
             DEVICE,
             G_rep.dtype
         )
 
         g_dt_inj = g_dt_rep + complex_awgn(
             g_dt_rep.shape,
-            INJECTION_VARIANCE,
+            train_injection_variance,
             DEVICE,
             g_dt_rep.dtype
         )
@@ -429,22 +544,22 @@ def forward_shortterm_robust_objective(
         )
 
         rates = comm_net.compute_rates(sinrs)
-        sum_rate = rates.sum(dim=1)                                   # shape = (B*s,)
+        sum_rate = rates.sum(dim=1)
 
         sense_snr = comm_net.compute_sense_snr(
             g_dt=g_dt_inj,
             W_R=W_R_rep,
             W_C=W_C_rep,
             pl_BS_TAR_BS=pl_BS_TAR_BS,
-        ).real                                                        # shape = (B*s,)
+        ).real
 
         sumrate_chunks.append(sum_rate.reshape(B, s))
         snr_chunks.append(sense_snr.reshape(B, s))
 
-    sumrate_samples = torch.cat(sumrate_chunks, dim=1)                # shape = (B,L)
-    snr_samples = torch.cat(snr_chunks, dim=1)                        # shape = (B,L)
+    sumrate_samples = torch.cat(sumrate_chunks, dim=1)
+    snr_samples = torch.cat(snr_chunks, dim=1)
 
-    sumrate_mean_per_sample = sumrate_samples.mean(dim=1)             # shape = (B,)
+    sumrate_mean_per_sample = sumrate_samples.mean(dim=1)
     sumrate_mean = sumrate_mean_per_sample.mean()
 
     q = float(OUTAGE_QUANTILE)
@@ -453,7 +568,7 @@ def forward_shortterm_robust_objective(
         snr_samples,
         k=k,
         dim=1
-    ).values                                                          # shape = (B,)
+    ).values
 
     snr_penalty = torch.clamp(
         SENSING_SNR_THRESHOLD - snr_var,
@@ -462,7 +577,7 @@ def forward_shortterm_robust_objective(
 
     objective = (
         sumrate_mean
-        - ROB_SENSING_LOSS_WEIGHT * snr_penalty
+        - sensing_loss_weight * snr_penalty
     )
 
     logs = {
@@ -488,6 +603,7 @@ def validate_shortterm_regular_sampled(
     val_dataset,
     num_val_layouts: int,
     channels_per_layout: int,
+    sensing_loss_weight: float,
 ):
     """
     從 validation pool 抽樣 layouts，計算 regular short-term validation objective。
@@ -537,6 +653,7 @@ def validate_shortterm_regular_sampled(
             radar_net=radar_net,
             theta_fixed=theta_fixed,
             batch_data=batch_data,
+            sensing_loss_weight=sensing_loss_weight,
         )
 
         total_obj += float(obj.detach().cpu())
@@ -560,6 +677,9 @@ def validate_shortterm_robust_sampled(
     val_dataset,
     num_val_layouts: int,
     channels_per_layout: int,
+    sensing_loss_weight: float,
+    injection_samples: int,
+    train_injection_variance: float,
 ):
     """
     從 validation pool 抽樣 layouts，計算 robust short-term validation objective。
@@ -609,7 +729,9 @@ def validate_shortterm_robust_sampled(
             radar_net=radar_net,
             theta_fixed=theta_fixed,
             batch_data=batch_data,
-            injection_samples=INJECTION_SAMPLES,
+            sensing_loss_weight=sensing_loss_weight,
+            injection_samples=injection_samples,
+            train_injection_variance=train_injection_variance,
         )
 
         total_obj += float(obj.detach().cpu())
@@ -634,7 +756,9 @@ def train_shortterm_regular(
     radar_net,
     train_dataset,
     val_dataset,
-    resume=False,
+    paths: dict,
+    sensing_loss_weight: float,
+    resume: bool = False,
 ):
     """
     訓練 short-term regular networks。
@@ -644,12 +768,8 @@ def train_shortterm_regular(
         lr=REG_LEARNING_RATE
     )
 
-    curve_path = os.path.join(
-        CURVE_DIR,
-        f"shortterm_regular_curves_{SETTING_STRING}.npy"
-    )
-
-    state_path = build_st_train_state_path("shortterm_regular")
+    curve_path = paths["curve_path"]
+    state_path = paths["state_path"]
 
     if resume:
         print("[INFO] Resume short-term regular training state ...")
@@ -722,6 +842,7 @@ def train_shortterm_regular(
                     radar_net=radar_net,
                     theta_fixed=theta_fixed,
                     batch_data=batch_data,
+                    sensing_loss_weight=sensing_loss_weight,
                 )
 
                 loss = -obj / ST_BATCH_LAYOUTS
@@ -744,6 +865,7 @@ def train_shortterm_regular(
             val_dataset=val_dataset,
             num_val_layouts=N_VAL_LAYOUTS,
             channels_per_layout=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
+            sensing_loss_weight=sensing_loss_weight,
         )
 
         curves.append([
@@ -769,9 +891,15 @@ def train_shortterm_regular(
 
         if val_logs["objective"] > best_val_obj:
             best_val_obj = val_logs["objective"]
-            comm_net.save_model(verbose=False)
-            radar_net.save_model(verbose=False)
-        
+            comm_net.save_model(
+                path=paths["comm_ckpt_path"],
+                verbose=False
+            )
+            radar_net.save_model(
+                path=paths["radar_ckpt_path"],
+                verbose=False
+            )
+
         save_training_state(
             state_path=state_path,
             comm_net=comm_net,
@@ -782,8 +910,15 @@ def train_shortterm_regular(
         )
 
     print(f"[Short-Reg] best ValObj = {best_val_obj:.4e}")
-    comm_net.load_model(verbose=True)
-    radar_net.load_model(verbose=True)
+
+    comm_net.load_model(
+        path=paths["comm_ckpt_path"],
+        verbose=True
+    )
+    radar_net.load_model(
+        path=paths["radar_ckpt_path"],
+        verbose=True
+    )
 
 
 # ================================
@@ -795,7 +930,11 @@ def train_shortterm_robust(
     radar_net,
     train_dataset,
     val_dataset,
-    resume=False,
+    paths: dict,
+    sensing_loss_weight: float,
+    train_injection_variance: float,
+    injection_samples: int,
+    resume: bool = False,
 ):
     """
     訓練 short-term robust networks。
@@ -805,12 +944,8 @@ def train_shortterm_robust(
         lr=ROB_LEARNING_RATE
     )
 
-    curve_path = os.path.join(
-        CURVE_DIR,
-        f"shortterm_robust_curves_{SETTING_STRING}.npy"
-    )
-
-    state_path = build_st_train_state_path("shortterm_robust")
+    curve_path = paths["curve_path"]
+    state_path = paths["state_path"]
 
     if resume:
         print("[INFO] Resume short-term robust training state ...")
@@ -829,7 +964,6 @@ def train_shortterm_robust(
         curves = []
         start_epoch = 1
         end_epoch = ROB_EPOCHS
-
 
     longterm_net.eval()
     for p in longterm_net.parameters():
@@ -884,7 +1018,9 @@ def train_shortterm_robust(
                     radar_net=radar_net,
                     theta_fixed=theta_fixed,
                     batch_data=batch_data,
-                    injection_samples=INJECTION_SAMPLES,
+                    sensing_loss_weight=sensing_loss_weight,
+                    injection_samples=injection_samples,
+                    train_injection_variance=train_injection_variance,
                 )
 
                 loss = -obj / ST_BATCH_LAYOUTS
@@ -907,6 +1043,9 @@ def train_shortterm_robust(
             val_dataset=val_dataset,
             num_val_layouts=N_VAL_LAYOUTS,
             channels_per_layout=SHORTTERM_EST_CHANNELS_PER_LAYOUT,
+            sensing_loss_weight=sensing_loss_weight,
+            injection_samples=injection_samples,
+            train_injection_variance=train_injection_variance,
         )
 
         curves.append([
@@ -932,8 +1071,15 @@ def train_shortterm_robust(
 
         if val_logs["objective"] > best_val_obj:
             best_val_obj = val_logs["objective"]
-            comm_net.save_model(verbose=False)
-            radar_net.save_model(verbose=False)
+            comm_net.save_model(
+                path=paths["comm_ckpt_path"],
+                verbose=False
+            )
+            radar_net.save_model(
+                path=paths["radar_ckpt_path"],
+                verbose=False
+            )
+
         save_training_state(
             state_path=state_path,
             comm_net=comm_net,
@@ -944,150 +1090,107 @@ def train_shortterm_robust(
         )
 
     print(f"[Short-Rob] best ValObj = {best_val_obj:.4e}")
-    comm_net.load_model(verbose=True)
-    radar_net.load_model(verbose=True)
+
+    comm_net.load_model(
+        path=paths["comm_ckpt_path"],
+        verbose=True
+    )
+    radar_net.load_model(
+        path=paths["radar_ckpt_path"],
+        verbose=True
+    )
 
 
 # ================================
-# Plot short-term objective curves
+# Plot short-term objective curve
 # ================================
-def plot_shortterm_objective_curve():
-    reg_curve_path = os.path.join(
-        CURVE_DIR,
-        f"shortterm_regular_curves_{SETTING_STRING}.npy"
-    )
+def plot_shortterm_objective_curve(
+    mode: str,
+    penalty: float,
+    paths: dict,
+):
+    """
+    依照 mode + penalty 讀取對應的 short-term curve 並畫圖。
+    """
+    mode = mode.lower()
+    curve_path = paths["curve_path"]
 
-    rob_curve_path = os.path.join(
-        CURVE_DIR,
-        f"shortterm_robust_curves_{SETTING_STRING}.npy"
-    )
+    if not os.path.exists(curve_path):
+        raise FileNotFoundError(f"找不到 curve 檔案：{curve_path}")
 
-    reg_curves = np.load(reg_curve_path)
-    rob_curves = np.load(rob_curve_path)
+    curves = np.load(curve_path)
 
-    # 跳過 epoch [start_idx]，避免初期 objective 過低壓縮後期曲線
     start_idx = 10
-
     window = PLOT_MOVING_AVG_WINDOW
 
-    # ---------- REG ----------
-    reg_epochs = np.arange(start_idx + 1, reg_curves.shape[0] + 1)
+    if curves.shape[0] <= start_idx + window:
+        start_idx = 0
+        window = max(1, min(window, curves.shape[0]))
 
-    reg_train_obj = reg_curves[start_idx:, 0]
-    reg_val_obj   = reg_curves[start_idx:, 1]
+    epochs = np.arange(start_idx + 1, curves.shape[0] + 1)
 
-    reg_train_obj_ma = moving_average(reg_train_obj, window)
-    reg_val_obj_ma   = moving_average(reg_val_obj, window)
+    train_obj = curves[start_idx:, 0]
+    val_obj   = curves[start_idx:, 1]
 
-    reg_ma_epochs = reg_epochs[window - 1:]
+    train_obj_ma = moving_average(train_obj, window)
+    val_obj_ma   = moving_average(val_obj, window)
 
-    reg_fig_path = os.path.join(
-        CURVE_DIR,
-        f"shortterm_regular_objective_curve_{SETTING_STRING}.jpg"
-    )
+    ma_epochs = epochs[window - 1:]
+
+    fig_path = paths["curve_fig_path"]
+
+    if mode == "reg":
+        title = "Short-term Regular Training / Validation Objective"
+        train_label = "REG Train Objective"
+        val_label = "REG Validation Objective"
+    elif mode == "rob":
+        title = "Short-term Robust Training / Validation Objective"
+        train_label = "ROB Train Objective"
+        val_label = "ROB Validation Objective"
+    else:
+        raise ValueError(f"mode 必須是 'reg' 或 'rob'，收到：{mode}")
 
     plt.figure(figsize=(9, 5.5))
 
     plt.plot(
-        reg_epochs,
-        reg_train_obj,
-        label="REG Train Objective",
+        epochs,
+        train_obj,
+        label=train_label,
         alpha=0.35,
         linewidth=1.0
     )
 
     plt.plot(
-        reg_epochs,
-        reg_val_obj,
-        label="REG Validation Objective",
+        epochs,
+        val_obj,
+        label=val_label,
         alpha=0.35,
         linewidth=1.0
     )
 
     plt.plot(
-        reg_ma_epochs,
-        reg_train_obj_ma,
-        label=f"REG Train Objective MA({window})",
+        ma_epochs,
+        train_obj_ma,
+        label=f"{train_label} MA({window})",
         linewidth=2.2
     )
 
     plt.plot(
-        reg_ma_epochs,
-        reg_val_obj_ma,
-        label=f"REG Validation Objective MA({window})",
+        ma_epochs,
+        val_obj_ma,
+        label=f"{val_label} MA({window})",
         linewidth=2.2
     )
 
     plt.xlabel("Epoch")
     plt.ylabel("Objective")
-    plt.title("Short-term Regular Training / Validation Objective")
+    plt.title(title)
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()
 
-    plt.savefig(reg_fig_path, format="jpg", dpi=300)
-    print(f"[PLOT] 已儲存 regular objective curve：{reg_fig_path}")
-
-    plt.show()
-    plt.close()
-
-    # ---------- ROB ----------
-    rob_epochs = np.arange(start_idx + 1, rob_curves.shape[0] + 1)
-
-    rob_train_obj = rob_curves[start_idx:, 0]
-    rob_val_obj   = rob_curves[start_idx:, 1]
-
-    rob_train_obj_ma = moving_average(rob_train_obj, window)
-    rob_val_obj_ma   = moving_average(rob_val_obj, window)
-
-    rob_ma_epochs = rob_epochs[window - 1:]
-
-    rob_fig_path = os.path.join(
-        CURVE_DIR,
-        f"shortterm_robust_objective_curve_{SETTING_STRING}.jpg"
-    )
-
-    plt.figure(figsize=(9, 5.5))
-
-    plt.plot(
-        rob_epochs,
-        rob_train_obj,
-        label="ROB Train Objective",
-        alpha=0.35,
-        linewidth=1.0
-    )
-
-    plt.plot(
-        rob_epochs,
-        rob_val_obj,
-        label="ROB Validation Objective",
-        alpha=0.35,
-        linewidth=1.0
-    )
-
-    plt.plot(
-        rob_ma_epochs,
-        rob_train_obj_ma,
-        label=f"ROB Train Objective MA({window})",
-        linewidth=2.2
-    )
-
-    plt.plot(
-        rob_ma_epochs,
-        rob_val_obj_ma,
-        label=f"ROB Validation Objective MA({window})",
-        linewidth=2.2
-    )
-
-    plt.xlabel("Epoch")
-    plt.ylabel("Objective")
-    plt.title("Short-term Robust Training / Validation Objective")
-    plt.grid(True, linestyle="--", alpha=0.35)
-    plt.legend()
-    plt.tight_layout()
-
-    plt.savefig(rob_fig_path, format="jpg", dpi=300)
-    print(f"[PLOT] 已儲存 robust objective curve：{rob_fig_path}")
+    plt.savefig(fig_path, format="jpg", dpi=300)
+    print(f"[PLOT] 已儲存 short-term objective curve：{fig_path}")
 
     plt.show()
     plt.close()
@@ -1097,30 +1200,85 @@ def plot_shortterm_objective_curve():
 # Main
 # ================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train short-term networks")
+    parser = argparse.ArgumentParser(description="Train one short-term REG/ROB model")
+
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="reg",
+        choices=["reg", "rob"],
+        help="訓練模式：reg 或 rob。預設 reg。"
+    )
+
+    parser.add_argument(
+        "--penalty",
+        type=float,
+        default=None,
+        help="sensing loss weight。若未指定，reg 用 REG_SENSING_LOSS_WEIGHT，rob 用 ROB_SENSING_LOSS_WEIGHT。"
+    )
+
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="從該 mode + penalty 的 train_state 續訓。"
+    )
+
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="只讀取 short-term curve .npy 並畫圖，不進行訓練"
-    )
-    parser.add_argument(
-        "--train_reg",
-        action="store_true",
-        help="嚴謹續訓 short-term regular,只訓練 REG"
+        help="只讀取該 mode + penalty 的 curve .npy 並畫圖，不進行訓練。"
     )
 
-    parser.add_argument(
-        "--train_rob",
-        action="store_true",
-        help="嚴謹續訓 short-term robust,只訓練 ROB"
-    )
     args = parser.parse_args()
 
+    mode = args.mode.lower()
+
+    if args.penalty is None:
+        if mode == "reg":
+            penalty = float(REG_SENSING_LOSS_WEIGHT)
+        else:
+            penalty = float(ROB_SENSING_LOSS_WEIGHT)
+    else:
+        penalty = float(args.penalty)
+
+    train_injection_variance = float(INJECTION_VARIANCE)
+    injection_samples = int(INJECTION_SAMPLES)
+
+    paths = build_st_paths(
+        mode=mode,
+        penalty=penalty
+    )
+
+    print("\n[INFO] Short-term run setting:")
+    print(f"[INFO] mode = {mode}")
+    print(f"[INFO] penalty = {penalty}")
+    print(f"[INFO] train_injection_variance = {train_injection_variance}")
+    print(f"[INFO] injection_samples = {injection_samples}")
+    print(f"[INFO] run_dir = {paths['run_dir']}")
+    print(f"[INFO] comm_ckpt_path = {paths['comm_ckpt_path']}")
+    print(f"[INFO] radar_ckpt_path = {paths['radar_ckpt_path']}")
+    print(f"[INFO] curve_path = {paths['curve_path']}")
+    print(f"[INFO] state_path = {paths['state_path']}")
+
     if args.plot:
-        plot_shortterm_objective_curve()
+        plot_shortterm_objective_curve(
+            mode=mode,
+            penalty=penalty,
+            paths=paths,
+        )
         raise SystemExit
 
-    print("[INFO] 載入固定 datasets ...")
+    save_run_config(
+        paths=paths,
+        mode=mode,
+        penalty=penalty,
+        train_injection_variance=train_injection_variance,
+        injection_samples=injection_samples,
+    )
+
+    print("\n[INFO] 載入固定 datasets ...")
+    print(f"[INFO] TRAIN_DATASET_PATH = {TRAIN_DATASET_PATH}")
+    print(f"[INFO] VAL_DATASET_PATH = {VAL_DATASET_PATH}")
 
     train_dataset = load_shortterm_dataset(
         TRAIN_DATASET_PATH,
@@ -1132,30 +1290,35 @@ if __name__ == "__main__":
         "val"
     )
 
+    print("\n[INFO] 載入 shared long-term model ...")
+    print(f"[INFO] LONGTERM_CKPT_PATH = {LONGTERM_CKPT_PATH}")
+
     longterm_net = LongTermPositionNet(
-        ckpt_kind="longterm"
+        ckpt_kind=None
     ).to(DEVICE)
 
-    longterm_net.load_model(verbose=True)
+    longterm_net.load_model(
+        path=LONGTERM_CKPT_PATH,
+        verbose=True
+    )
 
-    # ================================
-    # Resume REG only
-    # ================================
-    if args.train_reg:
+    if mode == "reg":
         short_comm_reg = ShortTermCommNet(
-            ckpt_kind="short_comm"
+            ckpt_kind=None
         ).to(DEVICE)
 
         short_radar_reg = ShortTermRadarNet(
-            ckpt_kind="short_radar"
+            ckpt_kind=None
         ).to(DEVICE)
 
-        print("[INFO] 開始續訓 short-term regular ...")
-        print(f"[INFO] REG_EPOCHS additional = {REG_EPOCHS}")
+        print("\n[INFO] 開始訓練 short-term regular ...")
+        print(f"[INFO] REG_EPOCHS = {REG_EPOCHS}")
         print(f"[INFO] REG_LEARNING_RATE = {REG_LEARNING_RATE}")
         print(f"[INFO] MINIBATCHES = {MINIBATCHES}")
         print(f"[INFO] ST_BATCH_LAYOUTS = {ST_BATCH_LAYOUTS}")
         print(f"[INFO] ST_BATCH_EST_CHANNELS_PER_LAYOUT = {ST_BATCH_EST_CHANNELS_PER_LAYOUT}")
+        print(f"[INFO] REG sensing penalty = {penalty}")
+        print(f"[INFO] resume = {args.resume}")
 
         train_shortterm_regular(
             longterm_net=longterm_net,
@@ -1163,30 +1326,33 @@ if __name__ == "__main__":
             radar_net=short_radar_reg,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
-            resume=True,
+            paths=paths,
+            sensing_loss_weight=penalty,
+            resume=args.resume,
         )
 
-        print("[INFO] Short-term regular resume finished.")
-        raise SystemExit
+        print("[INFO] Short-term regular training finished.")
 
-    # ================================
-    # Resume ROB only
-    # ================================
-    if args.train_rob:
+    elif mode == "rob":
         short_comm_rob = ShortTermCommNet(
-            ckpt_kind="short_comm_robust"
+            ckpt_kind=None
         ).to(DEVICE)
 
         short_radar_rob = ShortTermRadarNet(
-            ckpt_kind="short_radar_robust"
+            ckpt_kind=None
         ).to(DEVICE)
 
-        print("[INFO] 開始續訓 short-term robust ...")
-        print(f"[INFO] ROB_EPOCHS additional = {ROB_EPOCHS}")
+        print("\n[INFO] 開始訓練 short-term robust ...")
+        print(f"[INFO] ROB_EPOCHS = {ROB_EPOCHS}")
         print(f"[INFO] ROB_LEARNING_RATE = {ROB_LEARNING_RATE}")
-        print(f"[INFO] INJECTION_SAMPLES = {INJECTION_SAMPLES}")
-        print(f"[INFO] INJECTION_VARIANCE = {INJECTION_VARIANCE}")
+        print(f"[INFO] MINIBATCHES = {MINIBATCHES}")
+        print(f"[INFO] ST_BATCH_LAYOUTS = {ST_BATCH_LAYOUTS}")
+        print(f"[INFO] ST_BATCH_EST_CHANNELS_PER_LAYOUT = {ST_BATCH_EST_CHANNELS_PER_LAYOUT}")
+        print(f"[INFO] ROB sensing penalty = {penalty}")
+        print(f"[INFO] train_injection_variance = {train_injection_variance}")
+        print(f"[INFO] injection_samples = {injection_samples}")
         print(f"[INFO] OUTAGE_QUANTILE = {OUTAGE_QUANTILE}")
+        print(f"[INFO] resume = {args.resume}")
 
         train_shortterm_robust(
             longterm_net=longterm_net,
@@ -1194,61 +1360,11 @@ if __name__ == "__main__":
             radar_net=short_radar_rob,
             train_dataset=train_dataset,
             val_dataset=val_dataset,
-            resume=True,
+            paths=paths,
+            sensing_loss_weight=penalty,
+            train_injection_variance=train_injection_variance,
+            injection_samples=injection_samples,
+            resume=args.resume,
         )
 
-        print("[INFO] Short-term robust resume finished.")
-        raise SystemExit
-
-    # ================================
-    # Fresh REG + ROB training
-    # ================================
-    short_comm_reg = ShortTermCommNet(
-        ckpt_kind="short_comm"
-    ).to(DEVICE)
-
-    short_radar_reg = ShortTermRadarNet(
-        ckpt_kind="short_radar"
-    ).to(DEVICE)
-
-    print("[INFO] 開始訓練 short-term regular ...")
-    print(f"[INFO] REG_EPOCHS = {REG_EPOCHS}")
-    print(f"[INFO] REG_LEARNING_RATE = {REG_LEARNING_RATE}")
-    print(f"[INFO] MINIBATCHES = {MINIBATCHES}")
-    print(f"[INFO] ST_BATCH_LAYOUTS = {ST_BATCH_LAYOUTS}")
-    print(f"[INFO] ST_BATCH_EST_CHANNELS_PER_LAYOUT = {ST_BATCH_EST_CHANNELS_PER_LAYOUT}")
-
-    train_shortterm_regular(
-        longterm_net=longterm_net,
-        comm_net=short_comm_reg,
-        radar_net=short_radar_reg,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        resume=False,
-    )
-
-    short_comm_rob = ShortTermCommNet(
-        ckpt_kind="short_comm_robust"
-    ).to(DEVICE)
-
-    short_radar_rob = ShortTermRadarNet(
-        ckpt_kind="short_radar_robust"
-    ).to(DEVICE)
-
-    print("[INFO] 開始訓練 short-term robust ...")
-    print(f"[INFO] ROB_EPOCHS = {ROB_EPOCHS}")
-    print(f"[INFO] ROB_LEARNING_RATE = {ROB_LEARNING_RATE}")
-    print(f"[INFO] INJECTION_SAMPLES = {INJECTION_SAMPLES}")
-    print(f"[INFO] INJECTION_VARIANCE = {INJECTION_VARIANCE}")
-    print(f"[INFO] OUTAGE_QUANTILE = {OUTAGE_QUANTILE}")
-
-    train_shortterm_robust(
-        longterm_net=longterm_net,
-        comm_net=short_comm_rob,
-        radar_net=short_radar_rob,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        resume=False,
-    )
-
-    print("[INFO] Short-term training finished.")
+        print("[INFO] Short-term robust training finished.")

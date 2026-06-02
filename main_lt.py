@@ -1,5 +1,4 @@
 # -*- coding: utf-8 -*-
-import os
 import argparse
 import numpy as np
 import torch
@@ -202,10 +201,7 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
     best_val_obj = -np.inf
     curves = []
 
-    curve_path = os.path.join(
-        CURVE_DIR,
-        f"longterm_curves_{SETTING_STRING}.npy"
-    )
+    curve_path = LONGTERM_CURVE_PATH
 
     n_train_layouts = train_dataset["ue_layouts"].shape[0]
 
@@ -268,20 +264,17 @@ def train_longterm(longterm_net, train_dataset, val_dataset):
 
         if val_obj_ep > best_val_obj:
             best_val_obj = val_obj_ep
-            longterm_net.save_model(verbose=False)
+            longterm_net.save_model(path=LONGTERM_CKPT_PATH, verbose=False)
 
     print(f"[LongTerm] best ValObj = {best_val_obj:.4e}")
-    longterm_net.load_model(verbose=True)
+    longterm_net.load_model(path=LONGTERM_CKPT_PATH, verbose=True)
 
 
 # ================================
 # Plot long-term objective curve
 # ================================
 def plot_longterm_objective_curve():
-    curve_path = os.path.join(
-        CURVE_DIR,
-        f"longterm_curves_{SETTING_STRING}.npy"
-    )
+    curve_path = LONGTERM_CURVE_PATH
 
     curves = np.load(curve_path)
 
@@ -300,10 +293,7 @@ def plot_longterm_objective_curve():
 
     ma_epochs = epochs[window - 1:]
 
-    fig_path = os.path.join(
-        CURVE_DIR,
-        f"longterm_objective_curve_{SETTING_STRING}.jpg"
-    )
+    fig_path = LONGTERM_CURVE_FIG_PATH
 
     plt.figure(figsize=(9, 5.5))
 
@@ -375,7 +365,7 @@ if __name__ == "__main__":
 
     val_dataset = load_longterm_dataset(VAL_DATASET_PATH,"val")
 
-    longterm_net = LongTermPositionNet(ckpt_kind="longterm").to(DEVICE)
+    longterm_net = LongTermPositionNet(ckpt_kind=None).to(DEVICE)
 
     print("[INFO] 開始 long-term 訓練 ...")
     print(f"[INFO] LT_EPOCHS = {LT_EPOCHS}")

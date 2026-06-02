@@ -1,0 +1,18 @@
+{
+    "mode": "reg",
+    "sensing_penalty": 100.0,
+    "train_injection_variance": 0.075,
+    "injection_samples": 200,
+    "outage_quantile": 0.05,
+    "noise_power": 1e-10,
+    "tx_power": 1.0,
+    "sensing_snr_threshold_db": 15.0,
+    "sensing_snr_threshold_linear": 31.622776601683793,
+    "train_dataset_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\shared_data\\dataset_train.npz",
+    "val_dataset_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\shared_data\\dataset_val.npz",
+    "longterm_ckpt_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\LT\\ckpt\\longterm.ckpt",
+    "comm_ckpt_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\ST_sweep\\REG_penalty_100\\ckpt\\short_comm.ckpt",
+    "radar_ckpt_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\ST_sweep\\REG_penalty_100\\ckpt\\short_radar.ckpt",
+    "curve_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\ST_sweep\\REG_penalty_100\\training_curves\\shortterm_regular_curves.npy",
+    "state_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_TXpower_1.0\\ST_sweep\\REG_penalty_100\\train_state\\shortterm_regular_train_state.pt"
+}

@@ -11,12 +11,25 @@ from neural_net import LongTermPositionNet, ShortTermCommNet, ShortTermRadarNet
 
 
 # ================================
-# Evaluation setting
+# TX power sweep setting
 # ================================
+BEST_REG_PENALTY = 100.0
+BEST_ROB_PENALTY = 0.5
+
+TX_POWER_DBM_LIST = [0, 5, 10, 15, 20, 25, 30]
+
+INJECTION_CASES = [
+    ("ROB inj=0", "rob", BEST_ROB_PENALTY, 0.0),
+    ("REG inj=0", "reg", BEST_REG_PENALTY, 0.0),
+    ("ROB inj=0.075", "rob", BEST_ROB_PENALTY, 0.075),
+    ("REG inj=0.075", "reg", BEST_REG_PENALTY, 0.075),
+]
+
 EVAL_INJECTION_CHUNK = 50
 
-REG_PENALTY_LIST = [70, 100, 150, 200, 300]
-ROB_PENALTY_LIST = [0.025, 0.05, 0.1, 0.5, 1]
+# SNR 圖預設畫 lower-tail sensing SNR。
+# 若你想改成平均 sensing SNR，可把 "q05_snr_db" 改成 "mean_snr_db"。
+SNR_PLOT_KEY = "q05_snr_db"
 
 
 # ================================
@@ -24,45 +37,46 @@ ROB_PENALTY_LIST = [0.025, 0.05, 0.1, 0.5, 1]
 # ================================
 def format_float_for_path(value: float) -> str:
     """
-    將 float 轉成與 main_st.py 相同的資料夾名稱格式。
+    將 float 轉成資料夾名稱格式。
 
     例：
-        0.025 -> 0p025
-        0.05  -> 0p05
-        0.1   -> 0p1
         0.5   -> 0p5
-        1.0   -> 1
-        200.0 -> 200
+        100.0 -> 100
     """
     value = float(value)
 
     if value.is_integer():
         return str(int(value))
 
-    text = str(value)
-    text = text.replace(".", "p")
-    text = text.replace("-", "m")
+    return str(value).replace(".", "p").replace("-", "m")
 
-    return text
+
+def dbm_to_watt(dbm: float) -> float:
+    """
+    dBm 轉 W。
+
+    P[W] = 10^((P[dBm] - 30) / 10)
+    """
+    return 10.0 ** ((float(dbm) - 30.0) / 10.0)
 
 
 def build_st_paths(mode: str, penalty: float) -> dict:
     """
-    根據 mode 與 penalty 建立 ST model checkpoint 路徑。
-    需與 main_st.py 的命名一致。
+    根據 mode 與 penalty 建立 ST checkpoint 路徑。
     """
     mode = mode.lower()
+    penalty_tag = format_float_for_path(penalty)
 
     if mode == "reg":
-        run_name = f"REG_penalty_{format_float_for_path(penalty)}"
+        run_name = f"REG_penalty_{penalty_tag}"
         comm_ckpt_name = "short_comm.ckpt"
         radar_ckpt_name = "short_radar.ckpt"
     elif mode == "rob":
-        run_name = f"ROB_penalty_{format_float_for_path(penalty)}"
+        run_name = f"ROB_penalty_{penalty_tag}"
         comm_ckpt_name = "short_comm_robust.ckpt"
         radar_ckpt_name = "short_radar_robust.ckpt"
     else:
-        raise ValueError(f"mode must be 'reg' or 'rob', got {mode}")
+        raise ValueError(f"mode must be reg or rob, got {mode}")
 
     run_dir = os.path.join(ST_SWEEP_DIR, run_name)
     ckpt_dir = os.path.join(run_dir, "ckpt")
@@ -76,18 +90,15 @@ def build_st_paths(mode: str, penalty: float) -> dict:
 
 def build_eval_dir() -> str:
     """
-    建立 fixed-injection selection eval 的輸出資料夾。
+    建立 TX power sweep 輸出資料夾。
     """
-    inj_tag = format_float_for_path(INJECTION_VARIANCE)
-
     eval_dir = os.path.join(
         BASE_RUN_DIR,
         "eval_results",
-        f"selection_testinj_{inj_tag}"
+        "eval3_txpower_sweep"
     )
 
     os.makedirs(eval_dir, exist_ok=True)
-
     return eval_dir
 
 
@@ -107,6 +118,9 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
     CN(0, variance): E|n|^2 = variance
     Re/Im ~ N(0, variance/2)
     """
+    if variance == 0.0:
+        return torch.zeros(shape, device=device, dtype=cdtype)
+
     sigma = math.sqrt(variance / 2.0)
 
     nr = torch.randn(
@@ -126,8 +140,8 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
 
 def reset_eval_seed():
     """
-    每個 model eval 前重設 seed。
-    讓 REG / ROB 在相同 test injection 下使用相同隨機擾動序列。
+    每個 case / TX power eval 前重設 seed。
+    讓不同模型在同一個 injection variance 下使用相同擾動序列。
     """
     np.random.seed(RANDOM_SEED)
     torch.manual_seed(RANDOM_SEED)
@@ -189,7 +203,7 @@ def extract_shortterm_batch(
     channel_ids: np.ndarray
 ):
     """
-    從 test dataset 取出指定 layout / channels 的 estimated channels。
+    取出指定 layout / channels。
     """
     h_dk_hat = np_to_torch_complex(
         dataset["st_h_dk_hat"][layout_id][channel_ids]
@@ -277,25 +291,33 @@ def load_shortterm_model(mode: str, penalty: float):
     for p in radar_net.parameters():
         p.requires_grad_(False)
 
-    return comm_net, radar_net, paths
+    return comm_net, radar_net
 
 
 # ================================
 # Evaluation core
 # ================================
 @torch.no_grad()
-def eval_one_batch_under_injection(
+def eval_one_batch_txpower(
     comm_net: ShortTermCommNet,
     radar_net: ShortTermRadarNet,
     theta_fixed: torch.Tensor,
     batch_data: dict,
+    tx_power_watt: float,
+    injection_variance: float,
 ):
     """
-    對一個 estimated-channel batch 做 fixed test injection evaluation。
+    對一個 estimated-channel batch 做 TX power sweep evaluation。
+
+    流程：
+        1. ST net 根據 estimated channel 輸出 W_C, W_R。
+        2. 先 normalize 到 settings.TRANSMIT_POWER_TOTAL。
+        3. 再縮放到目前 sweep 的 tx_power_watt。
+        4. 在指定 injection_variance 下計算 sum-rate 與 sensing SNR。
 
     回傳：
-        sumrate_np : shape = (B * INJECTION_SAMPLES,)
-        snr_db_np  : shape = (B * INJECTION_SAMPLES,)
+        sumrate_np : shape = (B * L_eff,)
+        snr_db_np  : shape = (B * L_eff,)
     """
     h_dk_hat = batch_data["h_dk_hat"]
     h_rk_hat = batch_data["h_rk_hat"]
@@ -308,7 +330,11 @@ def eval_one_batch_under_injection(
 
     B, M, K = h_dk_hat.shape
     N = h_rk_hat.shape[1]
-    L = int(INJECTION_SAMPLES)
+
+    if injection_variance == 0.0:
+        L = 1
+    else:
+        L = int(INJECTION_SAMPLES)
 
     theta_batch = theta_fixed.expand(B, RIS_UNIT)
 
@@ -328,7 +354,13 @@ def eval_one_batch_under_injection(
         theta_batch
     )
 
+    # 先正規化到 settings.TRANSMIT_POWER_TOTAL
     W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)
+
+    # 再縮放到目標 TX power
+    tx_scale = math.sqrt(float(tx_power_watt) / float(TRANSMIT_POWER_TOTAL))
+    W_C = W_C * tx_scale
+    W_R = W_R * tx_scale
 
     sumrate_chunks = []
     snr_db_chunks = []
@@ -354,28 +386,28 @@ def eval_one_batch_under_injection(
 
         h_dk_inj = h_dk_rep + complex_awgn(
             h_dk_rep.shape,
-            INJECTION_VARIANCE,
+            injection_variance,
             DEVICE,
             h_dk_rep.dtype
         )
 
         h_rk_inj = h_rk_rep + complex_awgn(
             h_rk_rep.shape,
-            INJECTION_VARIANCE,
+            injection_variance,
             DEVICE,
             h_rk_rep.dtype
         )
 
         G_inj = G_rep + complex_awgn(
             G_rep.shape,
-            INJECTION_VARIANCE,
+            injection_variance,
             DEVICE,
             G_rep.dtype
         )
 
         g_dt_inj = g_dt_rep + complex_awgn(
             g_dt_rep.shape,
-            INJECTION_VARIANCE,
+            injection_variance,
             DEVICE,
             g_dt_rep.dtype
         )
@@ -432,27 +464,28 @@ def eval_one_batch_under_injection(
 
 
 @torch.no_grad()
-def evaluate_one_model(
+def evaluate_case_txpower(
+    label: str,
     mode: str,
     penalty: float,
+    injection_variance: float,
+    tx_power_dbm: float,
+    tx_power_watt: float,
     longterm_net: LongTermPositionNet,
     test_dataset,
 ):
     """
-    評估單一 mode / penalty model。
-
-    回傳：
-        result      : dict
-        snr_db_all  : np.ndarray
-        sumrate_all : np.ndarray
+    評估單一 case 在單一 TX power 下的表現。
     """
-    print("\n" + "=" * 80)
-    print(f"[EVAL] mode={mode.upper()} penalty={penalty}")
-    print("=" * 80)
+    print(
+        f"[EVAL3] {label} | mode={mode.upper()} | "
+        f"penalty={penalty} | inj={injection_variance} | "
+        f"TX={tx_power_dbm} dBm"
+    )
 
     reset_eval_seed()
 
-    comm_net, radar_net, paths = load_shortterm_model(
+    comm_net, radar_net = load_shortterm_model(
         mode=mode,
         penalty=penalty
     )
@@ -476,11 +509,13 @@ def evaluate_one_model(
             channel_ids=channel_ids
         )
 
-        sumrate_np, snr_db_np = eval_one_batch_under_injection(
+        sumrate_np, snr_db_np = eval_one_batch_txpower(
             comm_net=comm_net,
             radar_net=radar_net,
             theta_fixed=theta_fixed,
             batch_data=batch_data,
+            tx_power_watt=tx_power_watt,
+            injection_variance=injection_variance,
         )
 
         sumrate_all.append(sumrate_np)
@@ -490,59 +525,49 @@ def evaluate_one_model(
     snr_db_all = np.concatenate(snr_db_all, axis=0)
 
     mean_sumrate = float(np.mean(sumrate_all))
+    q05_sumrate = float(np.quantile(sumrate_all, OUTAGE_QUANTILE))
+
+    mean_snr_db = float(np.mean(snr_db_all))
     q05_snr_db = float(np.quantile(snr_db_all, OUTAGE_QUANTILE))
     p_out = float(np.mean(snr_db_all < SENSING_SNR_THRESHOLD_dB))
-    feasible = bool(p_out <= OUTAGE_QUANTILE)
 
     result = {
+        "label": label,
         "mode": mode.upper(),
         "penalty": float(penalty),
+        "injection_variance": float(injection_variance),
+        "tx_power_dbm": float(tx_power_dbm),
+        "tx_power_watt": float(tx_power_watt),
         "mean_sumrate": mean_sumrate,
+        "q05_sumrate": q05_sumrate,
+        "mean_snr_db": mean_snr_db,
         "q05_snr_db": q05_snr_db,
         "p_out": p_out,
-        "feasible": feasible,
         "num_layouts": int(n_layouts),
         "channels_per_layout": int(n_eval_channels),
-        "test_injection_variance": float(INJECTION_VARIANCE),
-        "test_injection_samples": int(INJECTION_SAMPLES),
-        "run_dir": paths["run_dir"],
-        "comm_ckpt_path": paths["comm_ckpt_path"],
-        "radar_ckpt_path": paths["radar_ckpt_path"],
+        "injection_samples": int(INJECTION_SAMPLES if injection_variance > 0.0 else 1),
     }
 
     print(
-        f"[RESULT] {mode.upper()} penalty={penalty} | "
-        f"Mean SumRate={mean_sumrate:.6f} | "
-        f"Q{OUTAGE_QUANTILE:.2f} SNR={q05_snr_db:.3f} dB | "
-        f"P_out={100.0 * p_out:.3f}% | "
-        f"Feasible={feasible}"
+        f"[RESULT] {label} | TX={tx_power_dbm:>4.1f} dBm | "
+        f"MeanRate={mean_sumrate:.6f} | "
+        f"Q0.05Rate={q05_sumrate:.6f} | "
+        f"MeanSNR={mean_snr_db:.3f} dB | "
+        f"Q0.05SNR={q05_snr_db:.3f} dB | "
+        f"Pout={100.0 * p_out:.3f}%"
     )
 
-    return result, snr_db_all, sumrate_all
+    return result
 
 
 # ================================
-# Result saving
+# Save and plot
 # ================================
-def save_selection_table(results: list[dict], csv_path: str):
+def save_csv(rows: list[dict], csv_path: str):
     """
-    儲存 selection table。
+    儲存 CSV。
     """
-    fieldnames = [
-        "mode",
-        "penalty",
-        "mean_sumrate",
-        "q05_snr_db",
-        "p_out",
-        "feasible",
-        "num_layouts",
-        "channels_per_layout",
-        "test_injection_variance",
-        "test_injection_samples",
-        "run_dir",
-        "comm_ckpt_path",
-        "radar_ckpt_path",
-    ]
+    fieldnames = list(rows[0].keys())
 
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(
@@ -552,182 +577,56 @@ def save_selection_table(results: list[dict], csv_path: str):
 
         writer.writeheader()
 
-        for row in results:
+        for row in rows:
             writer.writerow(row)
 
-    print(f"[SAVE] selection table saved: {csv_path}")
+    print(f"[SAVE] CSV saved: {csv_path}")
 
 
-def select_best_feasible(results: list[dict], mode: str):
-    """
-    在指定 mode 中，從 P_out <= OUTAGE_QUANTILE 的模型選 mean sum-rate 最大者。
-    """
-    mode = mode.upper()
-
-    candidates = [
-        r for r in results
-        if r["mode"] == mode and r["feasible"]
-    ]
-
-    if len(candidates) == 0:
-        return None
-
-    return max(
-        candidates,
-        key=lambda r: r["mean_sumrate"]
-    )
-
-
-def save_best_summary(
-    best_reg,
-    best_rob,
-    summary_path: str
+def plot_txpower_metric(
+    rows: list[dict],
+    metric_key: str,
+    ylabel: str,
+    title: str,
+    fig_path: str,
 ):
     """
-    儲存 best feasible REG / ROB summary。
+    畫 TX power sweep metric。
     """
-    lines = [
-        "Best feasible model selection\n",
-        "=" * 80 + "\n",
-        f"Test injection variance = {INJECTION_VARIANCE}\n",
-        f"Test injection samples  = {INJECTION_SAMPLES}\n",
-        f"SNR threshold           = {SENSING_SNR_THRESHOLD_dB} dB\n",
-        f"Outage constraint       = {OUTAGE_QUANTILE * 100:.2f}%\n",
-        "\nSelection rule:\n",
-        "Among models with P_out <= outage constraint, choose the highest mean sum-rate.\n\n",
-    ]
-
-    def format_best(name, best):
-        if best is None:
-            return f"[{name}] No feasible model found.\n"
-
-        return (
-            f"[{name}] Best feasible model\n"
-            f"  penalty        = {best['penalty']}\n"
-            f"  mean_sumrate   = {best['mean_sumrate']:.6f}\n"
-            f"  q05_snr_db     = {best['q05_snr_db']:.3f} dB\n"
-            f"  p_out          = {100.0 * best['p_out']:.3f}%\n"
-            f"  run_dir        = {best['run_dir']}\n"
-        )
-
-    lines.append(format_best("REG", best_reg))
-    lines.append("\n")
-    lines.append(format_best("ROB", best_rob))
-
-    with open(summary_path, "w", encoding="utf-8") as f:
-        f.write("".join(lines))
-
-    print(f"[SAVE] best feasible summary saved: {summary_path}")
-
-
-def save_npz_results(
-    results: list[dict],
-    snr_cdf_data: dict,
-    sumrate_data: dict,
-    npz_path: str
-):
-    """
-    儲存 metrics 與所有 SNR / sum-rate samples。
-    """
-    metrics_dtype = [
-        ("mode", "U8"),
-        ("penalty", "f8"),
-        ("mean_sumrate", "f8"),
-        ("q05_snr_db", "f8"),
-        ("p_out", "f8"),
-        ("feasible", "i4"),
-    ]
-
-    metrics_array = np.zeros(
-        len(results),
-        dtype=metrics_dtype
-    )
-
-    for i, r in enumerate(results):
-        metrics_array[i]["mode"] = r["mode"]
-        metrics_array[i]["penalty"] = r["penalty"]
-        metrics_array[i]["mean_sumrate"] = r["mean_sumrate"]
-        metrics_array[i]["q05_snr_db"] = r["q05_snr_db"]
-        metrics_array[i]["p_out"] = r["p_out"]
-        metrics_array[i]["feasible"] = int(r["feasible"])
-
-    save_dict = {
-        "metrics": metrics_array,
-    }
-
-    for key, value in snr_cdf_data.items():
-        save_dict[f"snr_db_{key}"] = value.astype(np.float32)
-
-    for key, value in sumrate_data.items():
-        save_dict[f"sumrate_{key}"] = value.astype(np.float32)
-
-    np.savez_compressed(
-        npz_path,
-        **save_dict
-    )
-
-    print(f"[SAVE] npz results saved: {npz_path}")
-
-
-# ================================
-# Plot
-# ================================
-def make_cdf(values: np.ndarray):
-    """
-    由 samples 建立 CDF。
-    """
-    x = np.sort(values)
-    y = np.arange(1, len(x) + 1, dtype=np.float64) / len(x)
-
-    return x, y
-
-
-def plot_snr_cdf_group(
-    mode: str,
-    penalties: list[float],
-    snr_cdf_data: dict,
-    fig_path: str
-):
-    """
-    畫同一 mode 下所有 penalty 的 SNR CDF。
-    """
-    mode = mode.upper()
-
     plt.figure(figsize=(9, 5.5))
 
-    for penalty in penalties:
-        key = f"{mode}_penalty_{format_float_for_path(penalty)}"
-        snr_db = snr_cdf_data[key]
-        x, y = make_cdf(snr_db)
+    for label, _, _, _ in INJECTION_CASES:
+        case_rows = [
+            r for r in rows
+            if r["label"] == label
+        ]
+
+        case_rows = sorted(
+            case_rows,
+            key=lambda r: r["tx_power_dbm"]
+        )
+
+        x = np.array(
+            [r["tx_power_dbm"] for r in case_rows],
+            dtype=np.float64
+        )
+
+        y = np.array(
+            [r[metric_key] for r in case_rows],
+            dtype=np.float64
+        )
 
         plt.plot(
             x,
             y,
-            linewidth=2.0,
-            label=f"{mode} penalty={penalty}"
+            marker="o",
+            linewidth=2.2,
+            label=label
         )
 
-    plt.axvline(
-        x=SENSING_SNR_THRESHOLD_dB,
-        linestyle="--",
-        linewidth=2.0,
-        label=f"SNR threshold = {SENSING_SNR_THRESHOLD_dB} dB"
-    )
-
-    plt.axhline(
-        y=OUTAGE_QUANTILE,
-        linestyle=":",
-        linewidth=2.0,
-        label=f"{OUTAGE_QUANTILE * 100:.0f}% outage level"
-    )
-
-    plt.xlabel("Sensing SNR (dB)")
-    plt.ylabel("CDF")
-    plt.title(
-        f"{mode} Sensing SNR CDF "
-        f"(test injection variance = {INJECTION_VARIANCE})"
-    )
-
+    plt.xlabel("Transmit Power (dBm)")
+    plt.ylabel(ylabel)
+    plt.title(title)
     plt.grid(True, linestyle="--", alpha=0.35)
     plt.legend()
     plt.tight_layout()
@@ -738,28 +637,28 @@ def plot_snr_cdf_group(
         format="jpg"
     )
 
-    print(f"[SAVE] SNR CDF figure saved: {fig_path}")
-
     plt.close()
+
+    print(f"[SAVE] Figure saved: {fig_path}")
 
 
 # ================================
 # Main
 # ================================
 if __name__ == "__main__":
-    print("[INFO] Fixed-injection selection evaluation started.")
+    print("[INFO] Eval3 TX power sweep started.")
     print(f"[INFO] DEVICE = {DEVICE}")
+    print(f"[INFO] BASE_RUN_DIR = {BASE_RUN_DIR}")
     print(f"[INFO] TEST_DATASET_PATH = {TEST_DATASET_PATH}")
     print(f"[INFO] LONGTERM_CKPT_PATH = {LONGTERM_CKPT_PATH}")
     print(f"[INFO] ST_SWEEP_DIR = {ST_SWEEP_DIR}")
 
-    print("\n[INFO] Evaluation setting:")
-    print(f"[INFO] INJECTION_VARIANCE = {INJECTION_VARIANCE}")
-    print(f"[INFO] INJECTION_SAMPLES = {INJECTION_SAMPLES}")
-    print(f"[INFO] EVAL_INJECTION_CHUNK = {EVAL_INJECTION_CHUNK}")
-    print("[INFO] Evaluation uses all test estimated channels per layout.")
-    print(f"[INFO] SNR threshold = {SENSING_SNR_THRESHOLD_dB} dB")
-    print(f"[INFO] Outage constraint = {100.0 * OUTAGE_QUANTILE:.2f}%")
+    print("\n[INFO] Sweep setting:")
+    print(f"[INFO] Best REG penalty = {BEST_REG_PENALTY}")
+    print(f"[INFO] Best ROB penalty = {BEST_ROB_PENALTY}")
+    print(f"[INFO] TX_POWER_DBM_LIST = {TX_POWER_DBM_LIST}")
+    print(f"[INFO] INJECTION_CASES = {INJECTION_CASES}")
+    print(f"[INFO] SNR_PLOT_KEY = {SNR_PLOT_KEY}")
 
     eval_dir = build_eval_dir()
     print(f"\n[INFO] EVAL_DIR = {eval_dir}")
@@ -767,113 +666,117 @@ if __name__ == "__main__":
     test_dataset = load_test_dataset(TEST_DATASET_PATH)
     longterm_net = load_longterm_model()
 
-    results = []
-    snr_cdf_data = {}
-    sumrate_data = {}
+    rows = []
 
-    for penalty in REG_PENALTY_LIST:
-        result, snr_db_all, sumrate_all = evaluate_one_model(
-            mode="reg",
-            penalty=penalty,
-            longterm_net=longterm_net,
-            test_dataset=test_dataset,
-        )
+    for tx_dbm in TX_POWER_DBM_LIST:
+        tx_watt = dbm_to_watt(tx_dbm)
 
-        results.append(result)
+        for label, mode, penalty, inj_var in INJECTION_CASES:
+            result = evaluate_case_txpower(
+                label=label,
+                mode=mode,
+                penalty=penalty,
+                injection_variance=inj_var,
+                tx_power_dbm=tx_dbm,
+                tx_power_watt=tx_watt,
+                longterm_net=longterm_net,
+                test_dataset=test_dataset,
+            )
 
-        key = f"REG_penalty_{format_float_for_path(penalty)}"
-        snr_cdf_data[key] = snr_db_all
-        sumrate_data[key] = sumrate_all
-
-    for penalty in ROB_PENALTY_LIST:
-        result, snr_db_all, sumrate_all = evaluate_one_model(
-            mode="rob",
-            penalty=penalty,
-            longterm_net=longterm_net,
-            test_dataset=test_dataset,
-        )
-
-        results.append(result)
-
-        key = f"ROB_penalty_{format_float_for_path(penalty)}"
-        snr_cdf_data[key] = snr_db_all
-        sumrate_data[key] = sumrate_all
-
-    inj_tag = format_float_for_path(INJECTION_VARIANCE)
+            rows.append(result)
 
     csv_path = os.path.join(
         eval_dir,
-        f"selection_table_testinj_{inj_tag}.csv"
+        "txpower_sweep_metrics.csv"
+    )
+
+    save_csv(
+        rows=rows,
+        csv_path=csv_path
     )
 
     npz_path = os.path.join(
         eval_dir,
-        f"selection_metrics_testinj_{inj_tag}.npz"
+        "txpower_sweep_metrics.npz"
     )
 
-    summary_path = os.path.join(
+    np.savez_compressed(
+        npz_path,
+        rows=np.array(
+            [
+                (
+                    r["label"],
+                    r["mode"],
+                    r["penalty"],
+                    r["injection_variance"],
+                    r["tx_power_dbm"],
+                    r["tx_power_watt"],
+                    r["mean_sumrate"],
+                    r["q05_sumrate"],
+                    r["mean_snr_db"],
+                    r["q05_snr_db"],
+                    r["p_out"],
+                )
+                for r in rows
+            ],
+            dtype=[
+                ("label", "U32"),
+                ("mode", "U8"),
+                ("penalty", "f8"),
+                ("injection_variance", "f8"),
+                ("tx_power_dbm", "f8"),
+                ("tx_power_watt", "f8"),
+                ("mean_sumrate", "f8"),
+                ("q05_sumrate", "f8"),
+                ("mean_snr_db", "f8"),
+                ("q05_snr_db", "f8"),
+                ("p_out", "f8"),
+            ]
+        )
+    )
+
+    print(f"[SAVE] NPZ saved: {npz_path}")
+
+    snr_fig_path = os.path.join(
         eval_dir,
-        f"best_feasible_summary_testinj_{inj_tag}.txt"
+        f"txpower_sweep_{SNR_PLOT_KEY}.jpg"
     )
 
-    save_selection_table(
-        results=results,
-        csv_path=csv_path
-    )
-
-    best_reg = select_best_feasible(
-        results=results,
-        mode="REG"
-    )
-
-    best_rob = select_best_feasible(
-        results=results,
-        mode="ROB"
-    )
-
-    save_best_summary(
-        best_reg=best_reg,
-        best_rob=best_rob,
-        summary_path=summary_path
-    )
-
-    save_npz_results(
-        results=results,
-        snr_cdf_data=snr_cdf_data,
-        sumrate_data=sumrate_data,
-        npz_path=npz_path
-    )
-
-    reg_fig_path = os.path.join(
+    rate_fig_path = os.path.join(
         eval_dir,
-        f"snr_cdf_all_REG_testinj_{inj_tag}.jpg"
+        "txpower_sweep_mean_sumrate.jpg"
     )
 
-    rob_fig_path = os.path.join(
-        eval_dir,
-        f"snr_cdf_all_ROB_testinj_{inj_tag}.jpg"
+    if SNR_PLOT_KEY == "q05_snr_db":
+        snr_ylabel = "Q0.05 Sensing SNR (dB)"
+        snr_title = "Transmit Power vs Q0.05 Sensing SNR"
+    elif SNR_PLOT_KEY == "mean_snr_db":
+        snr_ylabel = "Mean Sensing SNR (dB)"
+        snr_title = "Transmit Power vs Mean Sensing SNR"
+    else:
+        raise ValueError("SNR_PLOT_KEY must be q05_snr_db or mean_snr_db")
+
+    plot_txpower_metric(
+        rows=rows,
+        metric_key=SNR_PLOT_KEY,
+        ylabel=snr_ylabel,
+        title=snr_title,
+        fig_path=snr_fig_path
     )
 
-    plot_snr_cdf_group(
-        mode="REG",
-        penalties=REG_PENALTY_LIST,
-        snr_cdf_data=snr_cdf_data,
-        fig_path=reg_fig_path
-    )
-
-    plot_snr_cdf_group(
-        mode="ROB",
-        penalties=ROB_PENALTY_LIST,
-        snr_cdf_data=snr_cdf_data,
-        fig_path=rob_fig_path
+    plot_txpower_metric(
+        rows=rows,
+        metric_key="mean_sumrate",
+        ylabel="Mean Sum-Rate (bits/s/Hz)",
+        title="Transmit Power vs Mean Sum-Rate",
+        fig_path=rate_fig_path
     )
 
     print("\n" + "=" * 80)
-    print("[INFO] Fixed-injection selection evaluation finished.")
+    print("[INFO] Eval3 TX power sweep finished.")
     print("=" * 80)
 
-    print(f"[INFO] CSV table  : {csv_path}")
-    print(f"[INFO] NPZ result : {npz_path}")
-    print(f"[INFO] Summary    : {summary_path}")
-    print(f"[INFO] REG CDF    : {reg_fig_path}")
-    print(f"[INFO] ROB CDF    : {rob_fig_path}")
+    print(f"[INFO] CSV        : {csv_path}")
+    print(f"[INFO] NPZ        : {npz_path}")
+    print(f"[INFO] SNR figure : {snr_fig_path}")
+    print(f"[INFO] Rate figure: {rate_fig_path}")

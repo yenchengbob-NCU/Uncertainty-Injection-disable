@@ -1,0 +1,24 @@
+Best feasible model selection
+================================================================================
+Test injection variance = 0.075
+Test injection samples  = 200
+Power-normalized inj.   = True
+SNR threshold           = 16 dB
+Outage constraint       = 5.00%
+
+Selection rule:
+Among models with P_out <= outage constraint, choose the highest mean sum-rate.
+
+[REG] Best feasible model
+  penalty        = 100.0
+  mean_sumrate   = 9.479914
+  q05_snr_db     = 16.147 dB
+  p_out          = 3.795%
+  run_dir        = MLP\M6_Ris40_K2\N0_1e-10_INJERR_0.075_TXpower_1.0\ST_sweep\REG_penalty_100
+
+[ROB] Best feasible model
+  penalty        = 0.5
+  mean_sumrate   = 9.253957
+  q05_snr_db     = 16.770 dB
+  p_out          = 1.835%
+  run_dir        = MLP\M6_Ris40_K2\N0_1e-10_INJERR_0.075_TXpower_1.0\ST_sweep\ROB_penalty_0p5

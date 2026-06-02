@@ -18,6 +18,13 @@ EVAL_INJECTION_CHUNK = 50
 REG_PENALTY_LIST = [70, 100, 150, 200, 300]
 ROB_PENALTY_LIST = [0.025, 0.05, 0.1, 0.5, 1]
 
+# 是否在 fixed-injection evaluation 中，將 injected channels
+# 正規化回 estimated channels 的原始 power。
+# 目的：避免 additive Gaussian injection 額外放大 channel power，
+# 使 rate / SNR 的變化主要反映 channel direction / phase mismatch。
+POWER_NORMALIZE_INJECTED_CHANNELS = True
+POWER_NORM_EPS = 1e-12
+
 
 # ================================
 # Path helpers
@@ -122,6 +129,102 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
     ) * sigma
 
     return torch.complex(nr, ni).to(dtype=cdtype)
+
+
+
+
+def normalize_injected_channel_power(
+    injected: torch.Tensor,
+    reference: torch.Tensor,
+    norm_dims,
+    eps: float = POWER_NORM_EPS,
+) -> torch.Tensor:
+    """
+    將 injected channel 的 norm 正規化回 reference channel 的 norm。
+
+    目的：
+        1. 保留 estimated channel / large-scale fading 的原始 power。
+        2. 讓 test injection 主要代表 channel direction / phase uncertainty。
+        3. 避免 additive Gaussian injection 造成平均 channel power 隨 variance 增大。
+
+    公式：
+        H_norm = H_inj * ||H_ref|| / (||H_inj|| + eps)
+
+    Args:
+        injected  : 已加入 Gaussian perturbation 的 channel。
+        reference : 注入前的 estimated channel，shape 必須可與 injected 對應。
+        norm_dims : 計算 norm 的維度。
+        eps       : 避免除以 0 的小常數。
+    """
+    if not POWER_NORMALIZE_INJECTED_CHANNELS:
+        return injected
+
+    ref_norm = torch.linalg.vector_norm(
+        reference,
+        ord=2,
+        dim=norm_dims,
+        keepdim=True,
+    )
+
+    inj_norm = torch.linalg.vector_norm(
+        injected,
+        ord=2,
+        dim=norm_dims,
+        keepdim=True,
+    )
+
+    scale = ref_norm / inj_norm.clamp_min(eps)
+
+    return injected * scale
+
+
+def apply_power_normalization_to_injected_channels(
+    h_dk_inj: torch.Tensor,
+    h_dk_ref: torch.Tensor,
+    h_rk_inj: torch.Tensor,
+    h_rk_ref: torch.Tensor,
+    G_inj: torch.Tensor,
+    G_ref: torch.Tensor,
+    g_dt_inj: torch.Tensor,
+    g_dt_ref: torch.Tensor,
+):
+    """
+    對 fixed-injection evaluation 中使用的四種 channel 做 power normalization。
+
+    Shape convention:
+        h_dk : (B*L, M, K)  -> 每個 user k 的 BS-UE direct vector 各自正規化
+        h_rk : (B*L, N, K)  -> 每個 user k 的 RIS-UE vector 各自正規化
+        G    : (B*L, N, M)  -> 每個 sample 的 BS-RIS matrix 用 Frobenius norm 正規化
+        g_dt : (B*L, M, 1)  -> 每個 sample 的 sensing / target vector 正規化
+    """
+    if not POWER_NORMALIZE_INJECTED_CHANNELS:
+        return h_dk_inj, h_rk_inj, G_inj, g_dt_inj
+
+    h_dk_inj = normalize_injected_channel_power(
+        injected=h_dk_inj,
+        reference=h_dk_ref,
+        norm_dims=1,
+    )
+
+    h_rk_inj = normalize_injected_channel_power(
+        injected=h_rk_inj,
+        reference=h_rk_ref,
+        norm_dims=1,
+    )
+
+    G_inj = normalize_injected_channel_power(
+        injected=G_inj,
+        reference=G_ref,
+        norm_dims=(1, 2),
+    )
+
+    g_dt_inj = normalize_injected_channel_power(
+        injected=g_dt_inj,
+        reference=g_dt_ref,
+        norm_dims=(1, 2),
+    )
+
+    return h_dk_inj, h_rk_inj, G_inj, g_dt_inj
 
 
 def reset_eval_seed():
@@ -380,6 +483,17 @@ def eval_one_batch_under_injection(
             g_dt_rep.dtype
         )
 
+        h_dk_inj, h_rk_inj, G_inj, g_dt_inj = apply_power_normalization_to_injected_channels(
+            h_dk_inj=h_dk_inj,
+            h_dk_ref=h_dk_rep,
+            h_rk_inj=h_rk_inj,
+            h_rk_ref=h_rk_rep,
+            G_inj=G_inj,
+            G_ref=G_rep,
+            g_dt_inj=g_dt_inj,
+            g_dt_ref=g_dt_rep,
+        )
+
         theta_rep = theta_batch.unsqueeze(1).expand(
             B, s, N
         ).reshape(B * s, N)
@@ -505,6 +619,7 @@ def evaluate_one_model(
         "channels_per_layout": int(n_eval_channels),
         "test_injection_variance": float(INJECTION_VARIANCE),
         "test_injection_samples": int(INJECTION_SAMPLES),
+        "power_normalized_injection": bool(POWER_NORMALIZE_INJECTED_CHANNELS),
         "run_dir": paths["run_dir"],
         "comm_ckpt_path": paths["comm_ckpt_path"],
         "radar_ckpt_path": paths["radar_ckpt_path"],
@@ -539,6 +654,7 @@ def save_selection_table(results: list[dict], csv_path: str):
         "channels_per_layout",
         "test_injection_variance",
         "test_injection_samples",
+        "power_normalized_injection",
         "run_dir",
         "comm_ckpt_path",
         "radar_ckpt_path",
@@ -591,6 +707,7 @@ def save_best_summary(
         "=" * 80 + "\n",
         f"Test injection variance = {INJECTION_VARIANCE}\n",
         f"Test injection samples  = {INJECTION_SAMPLES}\n",
+        f"Power-normalized inj.   = {POWER_NORMALIZE_INJECTED_CHANNELS}\n",
         f"SNR threshold           = {SENSING_SNR_THRESHOLD_dB} dB\n",
         f"Outage constraint       = {OUTAGE_QUANTILE * 100:.2f}%\n",
         "\nSelection rule:\n",
@@ -653,6 +770,10 @@ def save_npz_results(
 
     save_dict = {
         "metrics": metrics_array,
+        "power_normalized_injection": np.array(
+            POWER_NORMALIZE_INJECTED_CHANNELS,
+            dtype=np.bool_,
+        ),
     }
 
     for key, value in snr_cdf_data.items():
@@ -756,6 +877,7 @@ if __name__ == "__main__":
     print("\n[INFO] Evaluation setting:")
     print(f"[INFO] INJECTION_VARIANCE = {INJECTION_VARIANCE}")
     print(f"[INFO] INJECTION_SAMPLES = {INJECTION_SAMPLES}")
+    print(f"[INFO] POWER_NORMALIZE_INJECTED_CHANNELS = {POWER_NORMALIZE_INJECTED_CHANNELS}")
     print(f"[INFO] EVAL_INJECTION_CHUNK = {EVAL_INJECTION_CHUNK}")
     print("[INFO] Evaluation uses all test estimated channels per layout.")
     print(f"[INFO] SNR threshold = {SENSING_SNR_THRESHOLD_dB} dB")
