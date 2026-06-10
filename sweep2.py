@@ -12,11 +12,18 @@ from settings import (
 
 
 # ================================
-# Penalty sweep settings
+# Paired penalty list
 # ================================
-REG_PENALTY_LIST = [70, 100, 150, 200, 300]
-
-ROB_PENALTY_LIST = [0.025, 0.05, 0.1, 0.5, 1]
+# 這裡要和你 sweep.py 實際訓練的 7 組一致
+PAIRED_PENALTY_LIST = [
+    (50.0,  0.10),
+    (70.0,  0.15),
+    (100.0, 0.20),
+    (150.0, 0.25),
+    (175.0, 0.30),
+    (200.0, 0.50),
+    (300.0, 1.00),
+]
 
 
 # ================================
@@ -24,7 +31,10 @@ ROB_PENALTY_LIST = [0.025, 0.05, 0.1, 0.5, 1]
 # ================================
 def run_command(cmd: list[str], dry_run: bool = False):
     """
-    執行 subprocess 指令。
+    執行 terminal command。
+
+    dry_run=True:
+        只印出 command，不實際畫圖。
     """
     print("\n" + "=" * 80)
     print("[SWEEP2-PLOT] Command:")
@@ -43,13 +53,24 @@ def run_command(cmd: list[str], dry_run: bool = False):
 
 def plot_one_run(
     mode: str,
-    penalty: float,
+    reg_penalty: float,
+    rob_penalty: float,
     dry_run: bool,
 ):
     """
     呼叫 main_st.py 畫單一 REG 或 ROB run 的 training curve。
+
+    注意：
+        main_st.py 的 --penalty 需要兩個值：
+            --penalty REG_PENALTY ROB_PENALTY
+
+        即使只畫 REG，也要傳入 ROB_PENALTY。
+        即使只畫 ROB，也要傳入 REG_PENALTY。
     """
     mode = mode.lower()
+
+    if mode not in ("reg", "rob"):
+        raise ValueError(f"mode 必須是 reg 或 rob，收到：{mode}")
 
     cmd = [
         sys.executable,
@@ -57,7 +78,8 @@ def plot_one_run(
         "--mode",
         mode,
         "--penalty",
-        str(penalty),
+        str(float(reg_penalty)),
+        str(float(rob_penalty)),
         "--plot",
     ]
 
@@ -85,6 +107,7 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--dry_run",
+        "--dry-run",
         action="store_true",
         help="只印出將執行的 command，不實際畫圖。"
     )
@@ -104,10 +127,11 @@ if __name__ == "__main__":
         print("[SWEEP2-PLOT] REG penalty plots")
         print("#" * 80)
 
-        for penalty in REG_PENALTY_LIST:
+        for reg_penalty, rob_penalty in PAIRED_PENALTY_LIST:
             plot_one_run(
                 mode="reg",
-                penalty=penalty,
+                reg_penalty=reg_penalty,
+                rob_penalty=rob_penalty,
                 dry_run=args.dry_run,
             )
 
@@ -116,10 +140,11 @@ if __name__ == "__main__":
         print("[SWEEP2-PLOT] ROB penalty plots")
         print("#" * 80)
 
-        for penalty in ROB_PENALTY_LIST:
+        for reg_penalty, rob_penalty in PAIRED_PENALTY_LIST:
             plot_one_run(
                 mode="rob",
-                penalty=penalty,
+                reg_penalty=reg_penalty,
+                rob_penalty=rob_penalty,
                 dry_run=args.dry_run,
             )
 

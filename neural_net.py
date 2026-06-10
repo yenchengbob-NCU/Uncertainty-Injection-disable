@@ -6,9 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from settings import *
 
-def build_ckpt_path(kind: str) -> str:
-    return os.path.join(CKPT_DIR, f"{kind}_{SETTING_STRING}.ckpt")
-
 
 class ISACNetBase(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, hidden_dim: int = 200, ckpt_kind: str | None = None):
@@ -22,8 +19,6 @@ class ISACNetBase(nn.Module):
         self.fc3 = nn.Linear(hidden_dim, hidden_dim)
         self.fc4 = nn.Linear(hidden_dim, hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, out_dim)
-
-        self.model_path = build_ckpt_path(ckpt_kind) if ckpt_kind is not None else ""
 
     @property
     def model_device(self):
@@ -217,9 +212,9 @@ class ISACNetBase(nn.Module):
 
     def normalize_tx_power(self, W_C, W_R, eps: float = 1e-12):
         """
-        將 ST nets 輸出的 raw beamformers 做總發射功率 scaling。
+        將 ST & LT nets 輸出的 raw beamformers 做總發射功率 scaling。
         先計算 raw power： P_raw = ||W_C_raw||_F^2 + ||W_R_raw||_F^2
-        再用同一個 scaling factor 同時縮放 W_C 與 W_R：
+        再用同一個 scaling factor 同時縮放 W_C 與 W_R 讓兩者加總為 txpower max
         scale = sqrt(P_max / (P_raw + eps))
         W_C = scale * W_C_raw
         W_R = scale * W_R_raw
