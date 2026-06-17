@@ -354,6 +354,7 @@ def eval_one_layout_under_injection(
 
     回傳:
         sumrate_np : shape = (B * L,)
+        sum_sinr_np: shape = (B * L,)
         snr_db_np  : shape = (B * L,)
     """
     h_dk_hat = batch_data["h_dk_hat"] # shape = (B, M, K)
@@ -377,6 +378,7 @@ def eval_one_layout_under_injection(
     W_C, W_R = comm_net.normalize_tx_power(W_C, W_R)
 
     sumrate_chunks = []
+    sum_sinr_chunks = []
     snr_db_chunks = []
 
     for s0 in range(0, L, EVAL_INJECTION_CHUNK):
@@ -433,8 +435,9 @@ def eval_one_layout_under_injection(
             pl_BS_RIS_UE=pl_BS_RIS_UE,
         )
 
+        sum_sinr = sinrs.sum(dim=1)     # shape = (B*s,)
         rates = comm_net.compute_rates(sinrs)
-        sum_rate = rates.sum(dim=1) # shape = (B*s,)
+        sum_rate = rates.sum(dim=1)     # shape = (B*s,)
 
         sense_snr = comm_net.compute_sense_snr(
             g_dt=g_dt_inj,
@@ -446,14 +449,15 @@ def eval_one_layout_under_injection(
         sense_snr_db = 10.0 * torch.log10(
             sense_snr.clamp_min(1e-12)
         )
-
+        sum_sinr_chunks.append(sum_sinr.detach().cpu().numpy().astype(np.float32))
         sumrate_chunks.append(sum_rate.detach().cpu().numpy().astype(np.float32))
         snr_db_chunks.append(sense_snr_db.detach().cpu().numpy().astype(np.float32))
-
+    
+    sum_sinr_np = np.concatenate(sum_sinr_chunks, axis=0)
     sumrate_np = np.concatenate(sumrate_chunks, axis=0)
     snr_db_np = np.concatenate(snr_db_chunks, axis=0)
 
-    return sumrate_np, snr_db_np
+    return sumrate_np, sum_sinr_np, snr_db_np
 
 
 @torch.no_grad()
@@ -485,6 +489,7 @@ def evaluate_one_model_at_injection(
     n_test_layouts = test_dataset["ue_layouts"].shape[0]
 
     sumrate_all = []
+    sum_sinr_all = []
     snr_db_all = []
 
     for layout_id in range(n_test_layouts):
@@ -500,7 +505,7 @@ def evaluate_one_model_at_injection(
             channel_ids
         )
 
-        sumrate_np, snr_db_np = eval_one_layout_under_injection(
+        sumrate_np, sum_sinr_np, snr_db_np = eval_one_layout_under_injection(
             comm_net=comm_net,
             radar_net=radar_net,
             theta_fixed=theta_fixed,
@@ -511,12 +516,16 @@ def evaluate_one_model_at_injection(
         )
 
         sumrate_all.append(sumrate_np)
+        sum_sinr_all.append(sum_sinr_np)
         snr_db_all.append(snr_db_np)
 
     sumrate_all = np.concatenate(sumrate_all, axis=0)
+    sum_sinr_all = np.concatenate(sum_sinr_all, axis=0)
     snr_db_all = np.concatenate(snr_db_all, axis=0)
 
     mean_sumrate = float(np.mean(sumrate_all))
+    mean_sum_sinr_linear = float(np.mean(sum_sinr_all))
+    mean_sum_sinr_db = float(10.0 * np.log10(max(mean_sum_sinr_linear, 1e-12)))
     q_snr_db = float(np.quantile(snr_db_all, OUTAGE_QUANTILE))
     p_out = float(np.mean(snr_db_all < SENSING_SNR_THRESHOLD_dB))
     reliability = float(1.0 - p_out)
@@ -526,6 +535,8 @@ def evaluate_one_model_at_injection(
         "penalty": float(penalty),
         "test_injection_variance": float(test_injection_variance),
         "mean_sumrate": mean_sumrate,
+        "mean_sum_sinr_linear": mean_sum_sinr_linear,
+        "mean_sum_sinr_db": mean_sum_sinr_db,
         "q_snr_db": q_snr_db,
         "p_out": p_out,
         "reliability": reliability,
@@ -540,12 +551,14 @@ def evaluate_one_model_at_injection(
         f"[RESULT] {mode.upper()} penalty={penalty} "
         f"test_inj={test_injection_variance} | "
         f"Mean SumRate={mean_sumrate:.6f} | "
-        f"Q{OUTAGE_QUANTILE:.2f} SNR={q_snr_db:.3f} dB | "
+        f"Mean Sum-SINR={mean_sum_sinr_linear:.6f} "
+        f"({mean_sum_sinr_db:.3f} dB) | "
+        f"Q{OUTAGE_QUANTILE:.2f} Sensing SNR={q_snr_db:.3f} dB | "
         f"P_out={100.0 * p_out:.3f}% | "
         f"Reliability={100.0 * reliability:.3f}%"
     )
 
-    return result, snr_db_all, sumrate_all
+    return result, snr_db_all, sumrate_all, sum_sinr_all
 
 
 # ================================
@@ -599,6 +612,8 @@ def save_npz_metrics(rows: list[dict], npz_path: str):
                     r["penalty"],
                     r["test_injection_variance"],
                     r["mean_sumrate"],
+                    r["mean_sum_sinr_linear"],
+                    r["mean_sum_sinr_db"],
                     r["q_snr_db"],
                     r["p_out"],
                     r["reliability"],
@@ -614,6 +629,8 @@ def save_npz_metrics(rows: list[dict], npz_path: str):
                 ("penalty", "f8"),
                 ("test_injection_variance", "f8"),
                 ("mean_sumrate", "f8"),
+                ("mean_sum_sinr_linear", "f8"),
+                ("mean_sum_sinr_db", "f8"),
                 ("q_snr_db", "f8"),
                 ("p_out", "f8"),
                 ("reliability", "f8"),
@@ -729,6 +746,68 @@ def plot_fixed_rate_cdf(
     plt.close()
 
     print(f"[SAVE] Rate CDF saved: {fig_path}")
+
+
+def plot_fixed_sum_sinr_cdf(
+    reg_sum_sinr: np.ndarray,
+    rob_sum_sinr: np.ndarray,
+    reg_penalty: float,
+    rob_penalty: float,
+    fixed_inj: float,
+    fig_path: str,
+):
+    """
+    Fixed injection 下 REG / ROB communication Sum-SINR CDF。
+
+    輸入的 reg_sum_sinr / rob_sum_sinr 為 linear scale。
+    繪圖前轉成 dB：
+        Sum-SINR_dB = 10 log10(Sum-SINR_linear)
+    """
+    reg_sum_sinr_db = 10.0 * np.log10(
+        np.maximum(reg_sum_sinr, 1e-12)
+    )
+
+    rob_sum_sinr_db = 10.0 * np.log10(
+        np.maximum(rob_sum_sinr, 1e-12)
+    )
+
+    plt.figure(figsize=(9, 5.5))
+
+    reg_x, reg_y = make_cdf(reg_sum_sinr_db)
+    rob_x, rob_y = make_cdf(rob_sum_sinr_db)
+
+    plt.plot(
+        reg_x,
+        reg_y,
+        linewidth=2.2,
+        label=f"REG penalty={reg_penalty}"
+    )
+
+    plt.plot(
+        rob_x,
+        rob_y,
+        linewidth=2.2,
+        label=f"ROB penalty={rob_penalty}"
+    )
+
+    plt.xlabel("Communication Sum-SINR (dB)")
+    plt.ylabel("CDF")
+    plt.title(
+        f"REG vs ROB Communication Sum-SINR CDF "
+        f"(test injection variance = {fixed_inj})"
+    )
+    plt.grid(True, linestyle="--", alpha=0.35)
+    plt.legend()
+    plt.tight_layout()
+
+    plt.savefig(
+        fig_path,
+        format="jpg",
+        dpi=300
+    )
+    plt.close()
+
+    print(f"[SAVE] Sum-SINR CDF saved: {fig_path}")
 
 
 def plot_injection_sweep_metric(
@@ -882,11 +961,13 @@ if __name__ == "__main__":
 
     fixed_reg_snr = None
     fixed_reg_rate = None
+    fixed_reg_sum_sinr = None
     fixed_rob_snr = None
     fixed_rob_rate = None
+    fixed_reg_sum_sinr = None
 
     for test_inj in injection_sweep_list:
-        reg_result, reg_snr_db, reg_sumrate = evaluate_one_model_at_injection(
+        reg_result, reg_snr_db, reg_sumrate, reg_sum_sinr = evaluate_one_model_at_injection(
             mode="reg",
             penalty=reg_penalty,
             comm_net=reg_comm_net,
@@ -899,7 +980,7 @@ if __name__ == "__main__":
             run_dir=reg_paths["run_dir"],
         )
 
-        rob_result, rob_snr_db, rob_sumrate = evaluate_one_model_at_injection(
+        rob_result, rob_snr_db, rob_sumrate, rob_sum_sinr = evaluate_one_model_at_injection(
             mode="rob",
             penalty=rob_penalty,
             comm_net=rob_comm_net,
@@ -918,8 +999,10 @@ if __name__ == "__main__":
         if abs(float(test_inj) - fixed_inj) < 1e-12:
             fixed_reg_snr = reg_snr_db
             fixed_reg_rate = reg_sumrate
+            fixed_reg_sum_sinr = reg_sum_sinr
             fixed_rob_snr = rob_snr_db
             fixed_rob_rate = rob_sumrate
+            fixed_rob_sum_sinr = rob_sum_sinr
 
     # ================================
     # Save sweep results
@@ -950,6 +1033,14 @@ if __name__ == "__main__":
     fixed_tag = format_float_for_path(fixed_inj)
 
     if fixed_reg_snr is not None:
+        fixed_reg_sum_sinr_db = 10.0 * np.log10(
+            np.maximum(fixed_reg_sum_sinr, 1e-12)
+        )
+
+        fixed_rob_sum_sinr_db = 10.0 * np.log10(
+            np.maximum(fixed_rob_sum_sinr, 1e-12)
+        )
+
         fixed_samples_npz_path = os.path.join(
             eval_dir,
             f"fixed_inj_{fixed_tag}_samples_{norm_tag}.npz"
@@ -959,8 +1050,10 @@ if __name__ == "__main__":
             fixed_samples_npz_path,
             reg_snr_db=fixed_reg_snr.astype(np.float32),
             reg_sumrate=fixed_reg_rate.astype(np.float32),
+            reg_sum_sinr_linear=fixed_reg_sum_sinr.astype(np.float32),
             rob_snr_db=fixed_rob_snr.astype(np.float32),
             rob_sumrate=fixed_rob_rate.astype(np.float32),
+            rob_sum_sinr_linear=fixed_rob_sum_sinr.astype(np.float32),
             fixed_injection_variance=np.array(fixed_inj, dtype=np.float32),
             reg_penalty=np.array(reg_penalty, dtype=np.float32),
             rob_penalty=np.array(rob_penalty, dtype=np.float32),
@@ -978,7 +1071,10 @@ if __name__ == "__main__":
             eval_dir,
             f"fixed_inj_{fixed_tag}_rate_cdf_{norm_tag}.jpg"
         )
-
+        sum_sinr_cdf_path = os.path.join(
+            eval_dir,
+            f"fixed_inj_{fixed_tag}_sum_sinr_cdf_{norm_tag}.jpg"
+        )
         plot_fixed_snr_cdf(
             reg_snr_db=fixed_reg_snr,
             rob_snr_db=fixed_rob_snr,
@@ -995,6 +1091,15 @@ if __name__ == "__main__":
             rob_penalty=rob_penalty,
             fixed_inj=fixed_inj,
             fig_path=rate_cdf_path,
+        )
+
+        plot_fixed_sum_sinr_cdf(
+            reg_sum_sinr=fixed_reg_sum_sinr,
+            rob_sum_sinr=fixed_rob_sum_sinr,
+            reg_penalty=reg_penalty,
+            rob_penalty=rob_penalty,
+            fixed_inj=fixed_inj,
+            fig_path=sum_sinr_cdf_path,
         )
 
     # ================================
@@ -1056,3 +1161,4 @@ if __name__ == "__main__":
     print(f"[INFO] Pout figure    : {pout_fig_path}")
     print(f"[INFO] Q-SNR figure   : {qsnr_fig_path}")
     print(f"[INFO] Rate figure    : {rate_fig_path}")
+    print(f"[INFO] Sum-SINR CDF   : {sum_sinr_cdf_path}")

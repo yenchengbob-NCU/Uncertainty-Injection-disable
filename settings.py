@@ -98,14 +98,14 @@ TRANSMIT_POWER_TOTAL    = 1.0
 # ================================
 # ISAC / 損失權重預設值
 # ================================
-SENSING_SNR_THRESHOLD_dB = 16
+SENSING_SNR_THRESHOLD_dB = 13
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)
 
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT = 150.0 # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT = 0.2   # rob 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT = 300.0 # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT = 0.1   # rob 感測懲罰權重
 RIS_POWER_LOSS_WEIGHT   = 250.0 # RIS元件 功率懲罰權重
 
 # ================================
@@ -142,7 +142,7 @@ OUTAGE_QUANTILE    = 0.05                       # SNR容許值
 # 訓練 / 驗證 / 測試
 # ================================
 LT_EPOCHS   = 300
-REG_EPOCHS  = 1000
+REG_EPOCHS  = 600
 ROB_EPOCHS  = 400
 
 MINIBATCHES = 50                                # 更新多少次權重 val 一次 
@@ -153,8 +153,8 @@ ST_BATCH_LAYOUTS = 30                           # ST 一個batch 抓多少 layou
 ST_BATCH_EST_CHANNELS_PER_LAYOUT = 100          # 一個layout 抓多少 估測通道 出來
 
 LT_LEARNING_RATE  = 0.001
-REG_LEARNING_RATE = 0.0005
-ROB_LEARNING_RATE = 0.0005
+REG_LEARNING_RATE = 0.001
+ROB_LEARNING_RATE = 0.001
 
 # ================================
 # 資料夾結構

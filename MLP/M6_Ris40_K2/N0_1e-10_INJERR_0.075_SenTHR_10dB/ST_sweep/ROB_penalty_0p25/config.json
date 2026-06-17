@@ -1,0 +1,18 @@
+{
+    "mode": "rob",
+    "sensing_penalty": 0.25,
+    "train_injection_variance": 0.075,
+    "injection_samples": 200,
+    "outage_quantile": 0.05,
+    "noise_power": 1e-10,
+    "tx_power": 1.0,
+    "sensing_snr_threshold_db": 10.0,
+    "sensing_snr_threshold_linear": 10.0,
+    "train_dataset_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\shared_data\\dataset_train.npz",
+    "val_dataset_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\shared_data\\dataset_val.npz",
+    "longterm_ckpt_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\LT\\ckpt\\longterm.ckpt",
+    "comm_ckpt_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\ST_sweep\\ROB_penalty_0p25\\ckpt\\short_comm_robust.ckpt",
+    "radar_ckpt_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\ST_sweep\\ROB_penalty_0p25\\ckpt\\short_radar_robust.ckpt",
+    "curve_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\ST_sweep\\ROB_penalty_0p25\\training_curves\\shortterm_robust_curves.npy",
+    "state_path": "MLP\\M6_Ris40_K2\\N0_1e-10_INJERR_0.075_SenTHR_10dB\\ST_sweep\\ROB_penalty_0p25\\train_state\\shortterm_robust_train_state.pt"
+}

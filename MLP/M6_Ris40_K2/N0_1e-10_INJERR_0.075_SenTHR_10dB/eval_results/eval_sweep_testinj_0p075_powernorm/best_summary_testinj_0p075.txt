@@ -1,0 +1,39 @@
+eval_sweep.py best feasible model summary
+================================================================================
+
+Evaluation setting:
+  test_injection_variance     = 0.075
+  test_injection_samples      = 200
+  power_normalized_injection  = True
+  sensing_snr_threshold       = 10 dB
+  outage_constraint           = 5.000%
+
+Selection rule:
+  Among models with P_out <= OUTAGE_QUANTILE, choose the highest mean sum-rate.
+  If no feasible model exists, fallback to the minimum P_out model.
+
+[Best REG]
+  selection_type = best_feasible
+  penalty        = 70.0
+  mean_sumrate   = 10.087024
+  q05_snr_db     = 11.661 dB
+  p_out          = 1.096%
+  reliability    = 98.904%
+  feasible       = True
+  run_dir        = MLP\M6_Ris40_K2\N0_1e-10_INJERR_0.075_SenTHR_10dB\ST_sweep\REG_penalty_70
+
+[Best ROB]
+  selection_type = best_feasible
+  penalty        = 0.1
+  mean_sumrate   = 10.262257
+  q05_snr_db     = 10.691 dB
+  p_out          = 2.968%
+  reliability    = 97.032%
+  feasible       = True
+  run_dir        = MLP\M6_Ris40_K2\N0_1e-10_INJERR_0.075_SenTHR_10dB\ST_sweep\ROB_penalty_0p1
+
+Performance comparison: ROB - REG
+  delta_mean_sumrate = 0.175233
+  delta_q05_snr_db   = -0.971 dB
+  delta_p_out        = 1.872%
+  delta_reliability  = -1.872%
