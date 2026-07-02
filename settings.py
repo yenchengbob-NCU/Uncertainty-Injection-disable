@@ -7,10 +7,6 @@ import torch
     1.設定基本參數
     2.建立階層資料夾
     3.生成UE layout 
-
-程式說明:
-    現在的階層資料夾包含
-    MLP/M6_Ris40_K2/N0_1e-10_INJERR_0.075_TXpower_1.0_SenTHR_16dB/
 """
 # ================================
 # 小工具
@@ -91,21 +87,21 @@ FC = 3.5e9
 C0 = 3e8
 LAMBDA = C0 / FC
 
-NOISE_POWER             = 10e-11
-ESTIMATION_PILOT_POWER  = 10e-10
-TRANSMIT_POWER_TOTAL    = 1.0
+NOISE_POWER             = 1e-10
+ESTIMATION_PILOT_POWER  = 1e-8
+TRANSMIT_POWER_TOTAL    = 0.1
 
 # ================================
 # ISAC / 損失權重預設值
 # ================================
-SENSING_SNR_THRESHOLD_dB = 13
+SENSING_SNR_THRESHOLD_dB = 0
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_dB / 10.0)
 
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT = 300.0 # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT = 0.1   # rob 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT = 0.0   # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT = 0.0   # rob 感測懲罰權重
 RIS_POWER_LOSS_WEIGHT   = 250.0 # RIS元件 功率懲罰權重
 
 # ================================
@@ -142,8 +138,8 @@ OUTAGE_QUANTILE    = 0.05                       # SNR容許值
 # 訓練 / 驗證 / 測試
 # ================================
 LT_EPOCHS   = 300
-REG_EPOCHS  = 600
-ROB_EPOCHS  = 400
+REG_EPOCHS  = 150
+ROB_EPOCHS  = 300
 
 MINIBATCHES = 50                                # 更新多少次權重 val 一次 
 PLOT_MOVING_AVG_WINDOW = 30                     # plot用，畫平滑曲線
