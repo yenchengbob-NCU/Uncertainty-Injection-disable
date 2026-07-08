@@ -63,30 +63,13 @@ class ISACNetBase(nn.Module):
     """
         放一些基礎函式
     """
-    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int , ckpt_kind: str ):
+    def __init__(self, ckpt_kind: str ):
         super().__init__()
-        self.in_dim     = in_dim
-        self.out_dim    = out_dim
-        self.hidden_dim = hidden_dim
         self.ckpt_kind  = ckpt_kind
-
-        self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc4 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc_out = nn.Linear(hidden_dim, out_dim)
     
     @property
     def model_device(self):
         return next(self.parameters()).device
-
-    def forward_mlp(self, x):
-        x = F.relu(self.fc1(x))
-        x = F.relu(self.fc2(x))
-        x = F.relu(self.fc3(x))
-        x = F.relu(self.fc4(x))
-        x = self.fc_out(x)
-        return x
 
     def save_model(self, path, verbose=True):
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -172,7 +155,7 @@ class ISACNetBase(nn.Module):
         剩餘功率才給 W_C
         """
         total_power = torch.as_tensor(TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
-        noise = torch.as_tensor(NOISE_POWER,dtype=torch.float32,device=DEVICE)
+        noise       = torch.as_tensor(NOISE_POWER,dtype=torch.float32,device=DEVICE)
 
         # 1) 先把 W_C, W_R 都變成 direction，消除 raw power 不均問題
         W_C_dir = W_C / (torch.sqrt(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12)
@@ -298,7 +281,10 @@ class ISACNetBase(nn.Module):
         sinr = signal / (comm_interf + radar_interf + noise)        # (B,K)
         sinr_db = 10.0 * torch.log10(sinr.clamp_min(1e-12))         # (B,K)
 
-        rate = torch.log1p(sinr) / math.log(2.0)                    # (B,K)
+        sumsinr = torch.sum(sinr, dim=1)                            # (B,)
+        sumsinr_db = torch.sum(sinr_db, dim=1)                      # (B,)
+
+        rate = rate = torch.log2(1.0 + sinr)                        # (B,K)
         sumrate = torch.sum(rate, dim=1)                            # (B,)
 
         sinr_user_mean = torch.mean(sinr, dim=0)                    # (K,) (average linear SINR first, then convert to dB)
@@ -307,6 +293,8 @@ class ISACNetBase(nn.Module):
         )                                                        
         rate_user_mean = torch.mean(rate, dim=0)                    # (K,)
         sumrate_mean = torch.mean(sumrate)                          # scalar
+        sumsinr_mean = torch.mean(sumsinr)                          # scalar
+        sumsinr_mean_db = torch.mean(sumsinr_db)                    # scalar
 
         # Target sensing SNR
 
@@ -330,6 +318,12 @@ class ISACNetBase(nn.Module):
         )              
 
         return {
+            # debug check
+            "signal": signal,                         # (B,K)
+            "comm_interf": comm_interf,               # (B,K)
+            "radar_interf": radar_interf,             # (B,K)
+            "noise": noise,                           # scalar
+
             # raw per-sample tensors
             "sinr": sinr,
             "sinr_db": sinr_db,
@@ -339,11 +333,17 @@ class ISACNetBase(nn.Module):
             "target_snr_db": target_snr_db,
 
             # B-average display values
-            "sinr_user_mean": sinr_user_mean,
+            "sinr_user_mean": sinr_user_mean,       # 各個UE SINR
             "sinr_user_mean_db": sinr_user_mean_db,
-            "rate_user_mean": rate_user_mean,
-            "sumrate_mean": sumrate_mean,
-            "target_snr_mean": target_snr_mean,
+
+            "rate_user_mean": rate_user_mean,       # 各個UE rate
+
+            "sumsinr_mean": sumsinr_mean,           # sumsinr
+            "sumsinr_mean_db": sumsinr_mean_db,
+
+            "sumrate_mean": sumrate_mean,           # sumrate 
+
+            "target_snr_mean": target_snr_mean,     # 感測SNR
             "target_snr_mean_db": target_snr_mean_db,
         }
 
@@ -359,20 +359,40 @@ class CommNet(ISACNetBase):
         -> input,       shape = (B, input_dim), real
     Output:
         output,         shape = (B, 2*M*K) real
-        -> W_C,         shape = (B, M, K), complex
+        -> W_C,         shape = (B, M, K), complex , Frobenius-normalized
     """
 
-    def __init__(self, hidden_dim: int = 256, ckpt_kind: str = "shortterm_comm"):
-            in_dim = 2 * (
+    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "shortterm_comm"):
+            super().__init__(ckpt_kind)
+
+            self.in_dim = 2 * (
                 TX_ANT * UAV_COMM +          # h_dk_hat_pl
                 RIS_UNIT * UAV_COMM +        # h_rk_hat_pl
                 RIS_UNIT * TX_ANT +          # G_hat_pl
                 TX_ANT                       # g_dt_hat_pl
-            )
+            )                                # 3152 real
 
-            out_dim = 2 * (TX_ANT * UAV_COMM)
+            self.hidden_dim = hidden_dim
+            self.out_complex_dim = TX_ANT * UAV_COMM   # 8*4 = 32 complex entries
 
-            super().__init__(in_dim, out_dim, hidden_dim, ckpt_kind)
+            self.fc1 = nn.Linear(self.in_dim, hidden_dim)                   # indim -> 64
+            self.fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)                # 64  -> 128
+            self.fc3 = nn.Linear(2 * hidden_dim, hidden_dim)                # 128 -> 64
+
+            self.fc_out_real = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 32 (W real part)
+            self.fc_out_imag = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 32 (W img  part)
+
+    def forward_mlp(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+
+        y_real = self.fc_out_real(x)
+        y_imag = self.fc_out_imag(x)
+
+        y = torch.cat([y_real, y_imag], dim=1) # 32+32=64 real 
+
+        return y
 
     def encode_channels(self, h_dk_hat_pl, h_rk_hat_pl, G_hat_pl, g_dt_hat_pl):
         """
@@ -454,7 +474,9 @@ class CommNet(ISACNetBase):
 
         y = self.forward_mlp(x)
 
-        W_C = self.decode_comm_beamformer(y)
+        W_C_raw = self.decode_comm_beamformer(y)
+
+        W_C = W_C_raw / (torch.sqrt(torch.sum(torch.abs(W_C_raw) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
 
         return W_C
 
@@ -470,20 +492,40 @@ class RadarNet(ISACNetBase):
         -> input,       shape = (B, input_dim), real
     Output:
         output,         shape = (B, 2*M*RADAR_STREAMS) real
-        -> W_R,         shape = (B, M, RADAR_STREAMS), complex
+        -> W_R,         shape = (B, M, RADAR_STREAMS), complex , Frobenius-normalized
     """
 
-    def __init__(self, hidden_dim: int = 256, ckpt_kind: str = "shortterm_radar"):
-        in_dim = 2 * (
-            TX_ANT * UAV_COMM +          # h_dk_hat_pl
-            RIS_UNIT * UAV_COMM +        # h_rk_hat_pl
-            RIS_UNIT * TX_ANT +          # G_hat_pl
-            TX_ANT                       # g_dt_hat_pl
-        )
+    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "shortterm_radar"):
+            super().__init__(ckpt_kind)
 
-        out_dim = 2 * (TX_ANT * RADAR_STREAMS)
+            self.in_dim = 2 * (
+                TX_ANT * UAV_COMM +          # h_dk_hat_pl
+                RIS_UNIT * UAV_COMM +        # h_rk_hat_pl
+                RIS_UNIT * TX_ANT +          # G_hat_pl
+                TX_ANT                       # g_dt_hat_pl
+            )                                # 3152 real
 
-        super().__init__(in_dim, out_dim, hidden_dim, ckpt_kind)
+            self.hidden_dim = hidden_dim
+            self.out_complex_dim = TX_ANT * RADAR_STREAMS   # 8*1 = 8 complex entries
+
+            self.fc1 = nn.Linear(self.in_dim, hidden_dim)                   # indim -> 64
+            self.fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)                # 64  -> 128
+            self.fc3 = nn.Linear(2 * hidden_dim, hidden_dim)                # 128 -> 64
+
+            self.fc_out_real = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 8 (W real part)
+            self.fc_out_imag = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 8 (W img  part)
+
+    def forward_mlp(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+
+        y_real = self.fc_out_real(x)
+        y_imag = self.fc_out_imag(x)
+
+        y = torch.cat([y_real, y_imag], dim=1) # 8+8=16 real 
+
+        return y
 
     def encode_channels(self, h_dk_hat_pl, h_rk_hat_pl, G_hat_pl, g_dt_hat_pl):
         """
@@ -562,16 +604,13 @@ class RadarNet(ISACNetBase):
             W_R, shape = (B, M, RADAR_STREAMS), complex
         """
 
-        x = self.encode_channels(
-            h_dk_hat_pl,
-            h_rk_hat_pl,
-            G_hat_pl,
-            g_dt_hat_pl,
-        )
+        x = self.encode_channels(h_dk_hat_pl,h_rk_hat_pl,G_hat_pl,g_dt_hat_pl,)
 
         y = self.forward_mlp(x)
 
-        W_R = self.decode_sensing_beamformer(y)
+        W_R_raw = self.decode_sensing_beamformer(y)
+
+        W_R = W_R_raw / (torch.sqrt(torch.sum(torch.abs(W_R_raw) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
 
         return W_R
     
@@ -587,20 +626,34 @@ class ThetaNet(ISACNetBase):
         -> input,       shape = (B, input_dim), real
     Output:
         output,         shape = (B, RIS_UNIT), real
-        -> W_R,         shape = (B, RIS_UNIT), complex
+        -> theta,       shape = (B, RIS_UNIT), complex
     """
 
-    def __init__(self, hidden_dim: int = 256, ckpt_kind: str = "shortterm_theta"):
-        in_dim = 2 * (
+    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "shortterm_theta"):
+        super().__init__(ckpt_kind)
+
+        self.in_dim = 2 * (
             TX_ANT * UAV_COMM +          # h_dk_hat_pl
             RIS_UNIT * UAV_COMM +        # h_rk_hat_pl
             RIS_UNIT * TX_ANT +          # G_hat_pl
             TX_ANT                       # g_dt_hat_pl
         )
 
-        out_dim = RIS_UNIT
+        self.hidden_dim = hidden_dim
+        self.out_dim = RIS_UNIT          # 128 real
 
-        super().__init__(in_dim, out_dim, hidden_dim, ckpt_kind)
+        self.fc1 = nn.Linear(self.in_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
+        self.fc3 = nn.Linear(2 * hidden_dim, hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, self.out_dim)
+        
+    def forward_mlp(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = torch.tanh(self.fc3(x))
+        x = self.fc_out(x)
+
+        return x
 
     def encode_channels(self, h_dk_hat_pl, h_rk_hat_pl, G_hat_pl, g_dt_hat_pl):
         """
@@ -661,8 +714,10 @@ class ThetaNet(ISACNetBase):
             theta: shape = (B, RIS_UNIT), complex
             |theta_n| = 1
         """
+        # 產生實數向量,代表每個element相位旋轉角度
         phase = y
-        theta = torch.complex(torch.cos(phase), torch.sin(phase))
+        # 變成RIS相位旋轉向量
+        theta = torch.exp(1j * phase).to(torch.complex64)
         return theta
 
     def forward(self, h_dk_hat_pl, h_rk_hat_pl, G_hat_pl, g_dt_hat_pl):
@@ -685,6 +740,7 @@ class ThetaNet(ISACNetBase):
         return theta
 
 
+'''
 class TestNet(ISACNetBase):
     """
     NN encoded input:
@@ -693,11 +749,11 @@ class TestNet(ISACNetBase):
         W_C         : (B, M, K), complex
     """
 
-    def __init__(self, hidden_dim: int = 256, ckpt_kind: str = "test_net"):
+    def __init__(self, hidden_dim: int = 128 , ckpt_kind: str = "test_net"):
         in_dim = 2 * (
-            UAV_COMM * TX_ANT            # H_eff_H
-        )
-        out_dim = 2 * (TX_ANT * UAV_COMM)
+            UAV_COMM * TX_ANT             # H_eff_H
+        )                                 # 64 real
+        out_dim = 2 * (TX_ANT * UAV_COMM) # 64 real
 
         super().__init__(in_dim, out_dim, hidden_dim, ckpt_kind)
 
@@ -761,5 +817,13 @@ class TestNet(ISACNetBase):
 
         W_C = self.decode_comm_beamformer(y)
 
-        return W_C
+        W_C_dir = W_C / (torch.sqrt(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
+
+        return W_C_dir
     
+
+
+
+'''
+
+
