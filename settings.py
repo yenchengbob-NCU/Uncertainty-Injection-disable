@@ -67,16 +67,16 @@ TRANSMIT_POWER_TOTAL    = 1.26      # 傳輸功率(W)
 COMM_SINR_THRESHOLD_DB = 5.0
 COMM_SINR_THRESHOLD = 10 ** (COMM_SINR_THRESHOLD_DB / 10.0)
 
-SENSING_SNR_THRESHOLD_DB = 4.0
+SENSING_SNR_THRESHOLD_DB = 2.0
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 
 
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 10.0   # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT  = 5.0  # rob 感測懲罰權重
-COMM_SINR_PENALTY_WEIGHT = 1000.0   # UE最小門檻懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 10.0     # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT  = 10.0     # rob 感測懲罰權重
+COMM_SINR_PENALTY_WEIGHT = 10.0     # UE最小門檻懲罰權重
 
 # ================================
 # dataset 生成
@@ -98,6 +98,7 @@ OUTAGE_QUANTILE    = 0.05                 # SNR容許值
 # ================================
 
 REG_EPOCHS      = 500
+ROB_EPOCHS      = 500
 N_BATCHE        = 50        # 一個epoch 內有多少個BATCH
 BATCH_CHANNELS  = 1000      # 一個BATCH 內有多少個通道
 

@@ -344,9 +344,9 @@ if __name__ == "__main__":
 
             val_metrics = comm_net.compute_isac_batch_performance(H_eff_val,g_dt_val,W_C_val,W_R_val)
             # 計算結果
-            val_rate_user         = val_metrics["rate_user_mean"]       # 各UE rate
-            val_sumrate           = val_metrics["sumrate_mean"]         # sum  rate
-            val_target_snr_db     = val_metrics["target_snr_db"]        # 感測SNR
+            val_rate_user         = val_metrics["rate_user_mean"]       # 各UE rate (K,)
+            val_sumrate           = val_metrics["sumrate_mean"]         # sum  rate (scalar)
+            val_target_snr_db     = val_metrics["target_snr_db"]        # 感測SNR    (B,)
             val_sensing_violation = torch.relu(SENSING_SNR_THRESHOLD - val_metrics["target_snr"])   # (B,)
             val_sensing_penalty   = torch.mean(val_sensing_violation )                              # scalar
 
