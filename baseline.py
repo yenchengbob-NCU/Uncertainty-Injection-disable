@@ -6,21 +6,20 @@ import torch
 from settings import *
 from one_timescale_NN import CommNet
 
-Debug = True                        # 終端印出檢查
+Debug = False                        # 終端印出檢查
 
-RZF_LAMBDA = 0.0                    # 設定為 0 就是ZF
+RZF_LAMBDA = 1e-9                    # 設定為 0 就是ZF
 # ============================================================
 # Helpers
 # ============================================================
-
-def to_db_np(x, eps=1e-30):
-    x = np.asarray(x, dtype=np.float64)
-    return 10.0 * np.log10(np.maximum(x, eps))
-
-
 def fmt_vec(x, precision=4):
     x = np.asarray(x).reshape(-1)
     return "{" + " ".join([f"[{float(v):.{precision}f}]" for v in x]) + "}"
+
+
+def fmt_vec_sci(x, precision=3):
+    x = np.asarray(x).reshape(-1)
+    return "{" + " ".join([f"[{float(v):.{precision}e}]" for v in x]) + "}"
 
 
 def make_random_ris(B):
@@ -179,9 +178,9 @@ if __name__ == "__main__":
     G    = torch.as_tensor(dataset["G_hat"],dtype=torch.complex64,device=DEVICE)        # (B, N, M)
     g_dt = torch.as_tensor(dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)     # (B, M, 1)
 
-    theta = make_random_ris(1)                      # 針對這 layout 建立 1 組 random RIS (B, N)
+    theta   = make_random_ris(1)                                    # 針對這 layout 建立 1 組 random RIS (B, N)
 
-    H_eff_H = physics_net.compute_effective_channel(h_dk,h_rk,G,theta)
+    H_eff_H = physics_net.compute_effective_channel(h_dk,h_rk,G,theta) 
 
     W_C_raw = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_raw
 
@@ -207,80 +206,56 @@ if __name__ == "__main__":
         )
 
     metrics = physics_net.compute_isac_batch_performance(H_eff_H,g_dt,W_C,W_R)
+    """ 輸出結果 :
+            SINR power components:
+                signal       : (B, K)
+                comm_interf  : (B, K)
+                radar_interf : (B, K)
+                noise        : scalar
 
-    if Debug:
-        signal_mean         = torch.mean(metrics["signal"], dim=0)
-        comm_interf_mean    = torch.mean(metrics["comm_interf"], dim=0)
-        radar_interf_mean   = torch.mean(metrics["radar_interf"], dim=0)
-        noise_value = metrics["noise"]
-        print("SINR公式檢查")
-        print(f"signal       : {signal_mean.detach().cpu().numpy()}")
-        print(f"comm_interf  : {comm_interf_mean.detach().cpu().numpy()}")
-        print(f"radar_interf : {radar_interf_mean.detach().cpu().numpy()}")
-        print(f"noise        : {float(noise_value.detach().cpu())}")
+            raw per-channel-sample tensors:
+                sinr          : (B, K), linear
+                sinr_db       : (B, K), dB
+                rate          : (B, K)
+                sumrate       : (B,)
+                target_snr    : (B,), linear
+                target_snr_db : (B,), dB
 
-    sinr_db_all    = metrics["sinr_db"].detach().cpu().numpy().reshape(-1)
-    sumrate_all    = metrics["sumrate"].detach().cpu().numpy().reshape(-1)
-    target_snr_all = metrics["target_snr"].detach().cpu().numpy().reshape(-1)
+            B-average display values: 對所有channel 平均
+                sinr_user_mean      : (K,), linear
+                sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
+                rate_user_mean      : (K,)
+                sumrate_mean        : scalar
+                target_snr_mean     : scalar, linear
+                target_snr_mean_db  : scalar, dB = 10log10(mean linear target SNR)
+    """
+    
+    # 取輸出結果
+    nominal_allUE_rate      = metrics["rate"]                               # (B,K)  所有UE在每筆估測通道的rate
+    nominal_target_snr      = metrics["target_snr"]                         # (B,)   每一筆估測通道(線性，因為要線性平均後在計算)
 
+    nominal_signal          = metrics["signal"]                             # (B,K)  各UE的signal power
+    nominal_comm_interf     = metrics["comm_interf"]                        # (B,K)  
+    nominal_radar_interf    = metrics["radar_interf"]                       # (B,K)
+    nominal_noise           = metrics["noise"]                              # scalar
 
-    logs = {
-        "sumrate_mean": float(metrics["sumrate_mean"].detach().cpu()),
-        "target_snr_mean": float(metrics["target_snr_mean"].detach().cpu()),
-        "target_snr_mean_db": float(metrics["target_snr_mean_db"].detach().cpu()),
+    # Nominal 計算
+    nominal_with_batch    = torch.min(nominal_allUE_rate, dim=1).values     # (B,)   每一筆估測通道，找出所有UE中 rate中最小的
+    nominal = torch.mean(nominal_with_batch)                                # scalar 對B筆估測通道min-rate平均
 
-        "sinr_user_mean": metrics["sinr_user_mean"].detach().cpu().numpy(),
-        "sinr_user_mean_db": metrics["sinr_user_mean_db"].detach().cpu().numpy(),
-        "rate_user_mean": metrics["rate_user_mean"].detach().cpu().numpy(),
+    # SINR組成 
+    signal_power         = torch.mean(nominal_signal,dim=0)                 #(K,)
+    comm_interf_power    = torch.mean(nominal_comm_interf, dim=0)           #(K,)
+    radar_interf_power   = torch.mean(nominal_radar_interf, dim=0)          #(K,)
 
-        "sinr_db_all": sinr_db_all,
-        "sumrate_all": sumrate_all,
-        "target_snr_all": target_snr_all,
-    }
-
-    # 對所有channel取平均
-    B = h_dk.shape[0]
-
-    mean_sumrate       = logs["sumrate_mean"]
-    mean_target_snr    = logs["target_snr_mean"]
-    mean_target_snr_db = logs["target_snr_mean_db"]
-
-    mean_user_sinr    = logs["sinr_user_mean"]
-    mean_user_sinr_db = logs["sinr_user_mean_db"]
-    mean_user_rate    = logs["rate_user_mean"]
-
-    print("=" * 90)
-    print("[Random RIS + RZF + NS-MRT Baseline]")
-    print("=" * 90)
-    print("Scenario        : 固定 UE layout")
-    print(f"RIS phase       : Random RIS, one theta shared by all {B} val estimated channels")
-    print(f"W_C             : RZF, RZF_LAMBDA = {RZF_LAMBDA:g}")
-    print(f"W_R             : H_eff_H nullspace MRT")
-    print(
-        f"Total TX POWER = {float(W_total_power.detach().cpu()):.6e}, \n"
-        f"W_C ratio = {float((W_C_power / W_total_power).detach().cpu()):.2f},"
-        f"W_R ratio = {float((W_R_power / W_total_power).detach().cpu()):.2f},"
-        )        
-    print("-" * 90)
-
-    print("[Communication metrics over val estimated channels]")
-    print(f"Mean sum-rate   : {mean_sumrate:.6f} bps/Hz")
-    print(f"UE SINR linear  : {fmt_vec(mean_user_sinr, precision=4)}")
-    print(f"UE SINR dB      : {fmt_vec(mean_user_sinr_db, precision=3)}")
-    print(f"UE rate         : {fmt_vec(mean_user_rate, precision=4)} bps/Hz")
-
-    print("-" * 90)
-    print("[Target sensing metrics over val estimated channels]")
-    print(f"Target SNR linear : {mean_target_snr:.6e} ")
-    print(f"Target SNR dB     : {mean_target_snr_db:.3f} dB")
-    print("=" * 90)
+    # Nominal target SNR：linear mean 後轉 dB
+    nominal_target_snr_mean = torch.mean(nominal_target_snr)                # scalar
+    nominal_target_snr_mean_db = 10.0 * torch.log10(nominal_target_snr_mean.clamp_min(1e-12))            
 
     # ============================================================
     # 接下來看 Random RIS + RZF + NS-MRT Baseline 在 injection channel 下的尾端性能
     # ============================================================
-
-    # 簡寫
-    S, B, M, N, K = INJECTION_SAMPLES, h_dk.shape[0], TX_ANT, RIS_UNIT, UAV_COMM
+    S, B, M, N, K = INJECTION_SAMPLES, h_dk.shape[0], TX_ANT, RIS_UNIT, UAV_COMM    # 簡寫
 
     # 使用 .unsqueeze(0) 新增第0維度 供INJ用
     # 使用 .expand       功能上"複製"通道成S份 (實際較複雜但最終是複製)
@@ -289,11 +264,8 @@ if __name__ == "__main__":
     G_rep    = G.unsqueeze(0).expand(S, B, N, M)
     g_dt_rep = g_dt.unsqueeze(0).expand(S, B, M, 1)
 
-
-
     # 注入不確定：INJECTION_VARIANCE 是相對通道功率
     # noise power = INJECTION_VARIANCE * mean(|channel|^2)
-
     h_dk_power = torch.mean(torch.abs(h_dk_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
     h_rk_power = torch.mean(torch.abs(h_rk_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
     G_power    = torch.mean(torch.abs(G_rep)    ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
@@ -326,60 +298,91 @@ if __name__ == "__main__":
 
     metrics_flat = physics_net.compute_isac_batch_performance(H_eff_H_flat,g_dt_flat,W_C_flat,W_R_flat)
     '''Output:
+            SINR power components:
+                signal       : (S*B, K)
+                comm_interf  : (S*B, K)
+                radar_interf : (S*B, K)
+                noise        : scalar
 
-        raw per-channel-sample tensors:
-            sinr          : (S*B, K), linear
-            sinr_db       : (S*B, K), dB
-            rate          : (S*B, K)
-            sumrate       : (S*B,)
-            target_snr    : (S*B,), linear
-            target_snr_db : (S*B,), dB
+            raw per-channel-sample tensors:
+                sinr          : (S*B, K), linear
+                sinr_db       : (S*B, K), dB
+                rate          : (S*B, K)
+                sumrate       : (S*B,)
+                target_snr    : (S*B,), linear
+                target_snr_db : (S*B,), dB
 
-        S*B-average display values: 對所有injeton * channel 平均
-            注意不可以用這裡! 這混淆了取5%
-            sinr_user_mean      : (K,), linear
-            sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
-            rate_user_mean      : (K,)
-            sumrate_mean        : scalar
-            target_snr_mean     : scalar, linear
-            target_snr_mean_db  : scalar, dB = 10log10(mean linear target SNR)
+            S*B-average  對所有injeton * channel 平均
+                注意不可以用這裡! 這混淆了取5%
+                sinr_user_mean      : (K,), linear
+                sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
+                rate_user_mean      : (K,)
+                sumrate_mean        : scalar
+                target_snr_mean     : scalar, linear
+                target_snr_mean_db  : scalar, dB = 10log10(mean linear target SNR)
     '''
     
-    # 還原shape
-    rate_inj      = metrics_flat["rate"].reshape(S, B, K)           # (S,B,K) 各UE的rate
+    # 還原shape並取輸出結果
+    robust_allUE_rate      = metrics_flat["rate"].reshape(S,B,K)                # (S,B,K) 各UE在每筆injection channel的rate
+    robust_target_snr      = metrics_flat["target_snr"].reshape(S,B)            # (S,B)   每一筆injection channel的target SNR，linear
 
-    # 對每個估測通道的S筆注入取5%,各UE分開
-    rate_user_q05 = torch.quantile(rate_inj,OUTAGE_QUANTILE,dim=0)  # (B,K)
+    robust_signal          = metrics_flat["signal"].reshape(S,B,K)              # (S,B,K) 各UE的signal power
+    robust_comm_interf     = metrics_flat["comm_interf"].reshape(S,B,K)         # (S,B,K) 各UE的communication interference
+    robust_radar_interf    = metrics_flat["radar_interf"].reshape(S,B,K)        # (S,B,K) 各UE的radar interference
+    robust_noise           = metrics_flat["noise"]                              # scalar
+    
+    # Robust計算
+    worstUE_rate          = torch.min(robust_allUE_rate,dim=2).values           # (S,B) 每一筆injection realization先找worst UE
+    robust_per_channel    = torch.quantile(worstUE_rate,OUTAGE_QUANTILE,dim=0)  # (B,) 每個estimated channel對S取Q0.05
+    robust                = torch.mean(robust_per_channel)                      # scalar 最後對B筆estimated channel平均
 
-    # 再算出Sumrate
-    sumrate_q05 = torch.sum(rate_user_q05, dim=1)                   # (B,)
+    # SINR組成 
+    robust_signal_power          = torch.mean(robust_signal,dim=(0,1))          # (K,) 對S,B平均
+    robust_comm_interf_power     = torch.mean(robust_comm_interf,dim=(0,1))     # (K,)
+    robust_radar_interf_power    = torch.mean(robust_radar_interf,dim=(0,1))    # (K,)
 
-    # 這時再對B通道平均
-    rob_sumrate         = torch.mean(sumrate_q05)                   # (scalar)
-    rate_user_q05_mean  = torch.mean(rate_user_q05, dim=0)          # (K,)
+    # Robust target SNR：linear mean 後轉 dB
+    robust_target_snr_mean = torch.mean(robust_target_snr,dim=(0,1))            # scalar, linear
+    robust_target_snr_mean_db = 10.0 * torch.log10(robust_target_snr_mean.clamp_min(1e-12))
 
-    # 取出對所有S*B平均的感測NSR,這裡可以這樣是因為不需要取5%
-    target_snr_mean_db = metrics_flat["target_snr_mean_db"]         # (scalar)
-
+    # ============================================================
     # 輸出結果
+    # ============================================================
     print("=" * 90)
-    print("[Injection-tail performance: Random RIS + ZF + NS-MRT Baseline]")
+    print("[Random RIS + RZF + NS-MRT Baseline]")
     print("=" * 90)
-    print(f"Injection samples S : {S}")
-    print(f"Estimated channels B: {B}")
-    print(f"Tail quantile       : {OUTAGE_QUANTILE:.2f}")
-    print("-" * 90)
-
-    print("[Communication tail metrics]")
-    print(f"Robust sum-rate     : {float(rob_sumrate.detach().cpu()):.6f} bps/Hz")
-    print(
-        f"UE tail rate        : "
-        f"{fmt_vec(rate_user_q05_mean.detach().cpu().numpy(), precision=4)} bps/Hz"
-    )
+    print(f"RIS phase             : Random RIS")
+    print(f"W_C                   : RZF, RZF_LAMBDA = {RZF_LAMBDA:g}")
+    print(f"W_R                   : H_eff_H nullspace MRT")
+    print(f"Estimated channels B  : {B}")
+    print(f"Injection samples S   : {S}")
+    print(f"Tail quantile         : {OUTAGE_QUANTILE:.2f}")
+    print(f"Total TX power        : {float(W_total_power.detach().cpu()):.6e}")
+    print(f"W_C / W_R power ratio : {float((W_C_power / W_total_power).detach().cpu()):.2f} / {float((W_R_power / W_total_power).detach().cpu()):.2f}")
 
     print("-" * 90)
-    print("[Target sensing metrics over injected channels]")
-    print(f"Target SNR mean dB  : {float(target_snr_mean_db.detach().cpu()):.3f} dB")
+    print("[Nominal performance: no error injection]")
+    print("-" * 90)
+    print(f"Nominal minimum-user rate : {float(nominal.detach().cpu()):.6f} bps/Hz")
+    print(f"Nominal target SNR mean   : {float(nominal_target_snr_mean_db.detach().cpu()):.3f} dB")
+
+    print("\n[Nominal SINR power components]")
+    print(f"Signal power               : {fmt_vec_sci(signal_power.detach().cpu().numpy(), precision=3)}")
+    print(f"Communication interference : {fmt_vec_sci(comm_interf_power.detach().cpu().numpy(), precision=3)}")
+    print(f"Radar interference         : {fmt_vec_sci(radar_interf_power.detach().cpu().numpy(), precision=3)}")
+    print(f"Noise power                : {float(nominal_noise.detach().cpu()):.3e}")
+
+    print("-" * 90)
+    print("[Robust performance: error injection]")
+    print("-" * 90)
+    print(f"Robust minimum-user rate Q{OUTAGE_QUANTILE:.2f} : {float(robust.detach().cpu()):.6f} bps/Hz")
+    print(f"Robust target SNR mean     : {float(robust_target_snr_mean_db.detach().cpu()):.3f} dB")
+
+    print("\n[Robust SINR power components]")
+    print(f"Signal power               : {fmt_vec_sci(robust_signal_power.detach().cpu().numpy(), precision=3)}")
+    print(f"Communication interference : {fmt_vec_sci(robust_comm_interf_power.detach().cpu().numpy(), precision=3)}")
+    print(f"Radar interference         : {fmt_vec_sci(robust_radar_interf_power.detach().cpu().numpy(), precision=3)}")
+    print(f"Noise power                : {float(robust_noise.detach().cpu()):.3e}")
     print("=" * 90)
     
     

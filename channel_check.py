@@ -82,13 +82,21 @@ if __name__ == "__main__":
     gH = torch.conj(g_dt).transpose(1, 2)                         # (B,1,M)
     G_sensing = torch.matmul(g_dt, gH)                            # (B,M,M)
 
-    print(f"{'h_dk_hat':<15s} {to_db_np(channel_power(h_dk)):.3f} dB    BS -> UE direct channel power")
-    print(f"{'h_rk_hat':<15s} {to_db_np(channel_power(h_rk)):.3f} dB    RIS -> UE channel power")
-    print(f"{'G_hat':<15s} {to_db_np(channel_power(G)):.3f} dB    BS -> RIS channel power")
-    print(f"{'g_dt_hat':<15s} {to_db_np(channel_power(g_dt)):.3f} dB    BS -> target one-way channel power")
-    print(f"{'H_ris_H':<15s} {to_db_np(channel_power(H_ris_H)):.3f} dB    BS -> RIS -> UE equivalent channel power")
-    print(f"{'G_sensing':<15s} {to_db_np(channel_power(G_sensing)):.3f} dB   BS -> target -> BS round-trip sensing matrix power")
-    print("=" * 90)
+    # 算出各通道的平均線性功率
+    p_h_dk = channel_power(h_dk)
+    p_h_rk = channel_power(h_rk)
+    p_G = channel_power(G)
+    p_g_dt = channel_power(g_dt)
+    p_H_ris = channel_power(H_ris_H)
+    p_G_sensing = channel_power(G_sensing)
+
+    print("[Channel power: dB, linear power, RMS amplitude]")
+    print(f"{'h_dk_hat':<15s} {to_db_np(p_h_dk):>9.3f} dB | power={p_h_dk:.6e} | rms={math.sqrt(p_h_dk):.6e}    BS -> UE direct channel")
+    print(f"{'h_rk_hat':<15s} {to_db_np(p_h_rk):>9.3f} dB | power={p_h_rk:.6e} | rms={math.sqrt(p_h_rk):.6e}    RIS -> UE channel")
+    print(f"{'G_hat':<15s} {to_db_np(p_G):>9.3f} dB | power={p_G:.6e} | rms={math.sqrt(p_G):.6e}    BS -> RIS channel")
+    print(f"{'g_dt_hat':<15s} {to_db_np(p_g_dt):>9.3f} dB | power={p_g_dt:.6e} | rms={math.sqrt(p_g_dt):.6e}    BS -> target one-way channel")
+    print(f"{'H_ris_H':<15s} {to_db_np(p_H_ris):>9.3f} dB | power={p_H_ris:.6e} | rms={math.sqrt(p_H_ris):.6e}    BS -> RIS -> UE equivalent channel")
+    print(f"{'G_sensing':<15s} {to_db_np(p_G_sensing):>9.3f} dB | power={p_G_sensing:.6e} | rms={math.sqrt(p_G_sensing):.6e}    BS -> target -> BS sensing matrix")
 
 
 

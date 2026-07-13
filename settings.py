@@ -64,19 +64,19 @@ TRANSMIT_POWER_TOTAL    = 1.26      # 傳輸功率(W)
 # ================================
 # ISAC / 損失權重預設值
 # ================================
-COMM_SINR_THRESHOLD_DB = 5.0
-COMM_SINR_THRESHOLD = 10 ** (COMM_SINR_THRESHOLD_DB / 10.0)
+# COMM_SINR_THRESHOLD_DB = 2.0
+# COMM_SINR_THRESHOLD = 10 ** (COMM_SINR_THRESHOLD_DB / 10.0)
 
-SENSING_SNR_THRESHOLD_DB = 2.0
+SENSING_SNR_THRESHOLD_DB = 4.0
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 
 
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 10.0     # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT  = 10.0     # rob 感測懲罰權重
-COMM_SINR_PENALTY_WEIGHT = 10.0     # UE最小門檻懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 1.0     # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT  = 1.0     # rob 感測懲罰權重
+# COMM_SINR_PENALTY_WEIGHT = 10.0     # UE最小門檻懲罰權重
 
 # ================================
 # dataset 生成

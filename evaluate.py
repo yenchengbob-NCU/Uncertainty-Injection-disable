@@ -168,7 +168,8 @@ if __name__ == "__main__":
         H_eff_H_reg_flat = physics_net.compute_effective_channel(h_dk_flat,h_rk_flat,G_flat,theta_reg_flat)
 
         reg_metrics_flat = physics_net.compute_isac_batch_performance(H_eff_H_reg_flat,g_dt_flat,W_C_reg_flat,W_R_reg_flat)
-
+        
+        # 計算結果
         reg_rate_inj = reg_metrics_flat["rate"].reshape(S, B, K)                # (S,B,K)
 
         reg_rate_user_q05 = torch.quantile(reg_rate_inj,OUTAGE_QUANTILE,dim=0)  # (B,K)

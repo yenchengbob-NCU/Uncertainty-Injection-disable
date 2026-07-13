@@ -53,7 +53,7 @@ def pathloss_db_norm(pl, batch_size, device, out_dim):
 
     return pl_db_norm
 
-
+NET = 64
 Debug = False                      # 終端印出檢查
 # ================================
 # neural net
@@ -244,6 +244,12 @@ class ISACNetBase(nn.Module):
             W_R     : (B, M, RADAR_STREAMS), complex
 
         Output:
+            SINR power components:
+                signal       : (B, K)
+                comm_interf  : (B, K)
+                radar_interf : (B, K)
+                noise        : scalar
+
             raw per-channel-sample tensors:
                 sinr          : (B, K), linear
                 sinr_db       : (B, K), dB
@@ -284,7 +290,7 @@ class ISACNetBase(nn.Module):
         sumsinr = torch.sum(sinr, dim=1)                            # (B,)
         sumsinr_db = torch.sum(sinr_db, dim=1)                      # (B,)
 
-        rate = rate = torch.log2(1.0 + sinr)                        # (B,K)
+        rate    = torch.log2(1.0 + sinr)                            # (B,K)
         sumrate = torch.sum(rate, dim=1)                            # (B,)
 
         sinr_user_mean = torch.mean(sinr, dim=0)                    # (K,) (average linear SINR first, then convert to dB)
@@ -362,7 +368,7 @@ class CommNet(ISACNetBase):
         -> W_C,         shape = (B, M, K), complex , Frobenius-normalized
     """
 
-    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "shortterm_comm"):
+    def __init__(self, hidden_dim: int = NET, ckpt_kind: str = "shortterm_comm"):
             super().__init__(ckpt_kind)
 
             self.in_dim = 2 * (
@@ -381,6 +387,10 @@ class CommNet(ISACNetBase):
 
             self.fc_out_real = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 32 (W real part)
             self.fc_out_imag = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 32 (W img  part)
+
+            # 新增 設置初始bias=0
+            for layer in [self.fc1,self.fc2,self.fc3,self.fc_out_real,self.fc_out_imag]:
+                nn.init.zeros_(layer.bias)
 
     def forward_mlp(self, x):
         x = F.relu(self.fc1(x))
@@ -421,10 +431,10 @@ class CommNet(ISACNetBase):
         G_hat_pl    = normalize_complex_block(G_hat_pl)
         g_dt_hat_pl = normalize_complex_block(g_dt_hat_pl)
         """
-        h_dk_hat_pl = 10000 * (h_dk_hat_pl)
-        h_rk_hat_pl = 100   * (h_rk_hat_pl)
-        G_hat_pl    = 10000 * (G_hat_pl)
-        g_dt_hat_pl = 1000  * (g_dt_hat_pl)
+        h_dk_hat_pl = 2.8e4 * (h_dk_hat_pl)
+        h_rk_hat_pl = 1.5e2   * (h_rk_hat_pl)
+        G_hat_pl    = 4.0e3 * (G_hat_pl)
+        g_dt_hat_pl = 1.0e3  * (g_dt_hat_pl)
 
 
         B = h_dk_hat_pl.shape[0]
@@ -495,7 +505,7 @@ class RadarNet(ISACNetBase):
         -> W_R,         shape = (B, M, RADAR_STREAMS), complex , Frobenius-normalized
     """
 
-    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "shortterm_radar"):
+    def __init__(self, hidden_dim: int = NET, ckpt_kind: str = "shortterm_radar"):
             super().__init__(ckpt_kind)
 
             self.in_dim = 2 * (
@@ -514,6 +524,10 @@ class RadarNet(ISACNetBase):
 
             self.fc_out_real = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 8 (W real part)
             self.fc_out_imag = nn.Linear(hidden_dim, self.out_complex_dim)  # 64  -> 8 (W img  part)
+            
+            # 新增 設置初始bias=0
+            for layer in [self.fc1,self.fc2,self.fc3,self.fc_out_real,self.fc_out_imag]:
+                nn.init.zeros_(layer.bias)
 
     def forward_mlp(self, x):
         x = F.relu(self.fc1(x))
@@ -555,10 +569,10 @@ class RadarNet(ISACNetBase):
         g_dt_hat_pl = normalize_complex_block(g_dt_hat_pl)
         """
 
-        h_dk_hat_pl = 10000 * (h_dk_hat_pl)
-        h_rk_hat_pl = 100   * (h_rk_hat_pl)
-        G_hat_pl    = 10000 * (G_hat_pl)
-        g_dt_hat_pl = 1000  * (g_dt_hat_pl)
+        h_dk_hat_pl = 2.8e4 * (h_dk_hat_pl)
+        h_rk_hat_pl = 1.5e2   * (h_rk_hat_pl)
+        G_hat_pl    = 4.0e3 * (G_hat_pl)
+        g_dt_hat_pl = 1.0e3  * (g_dt_hat_pl)
 
         B = h_dk_hat_pl.shape[0]
 
@@ -629,7 +643,7 @@ class ThetaNet(ISACNetBase):
         -> theta,       shape = (B, RIS_UNIT), complex
     """
 
-    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "shortterm_theta"):
+    def __init__(self, hidden_dim: int = NET, ckpt_kind: str = "shortterm_theta"):
         super().__init__(ckpt_kind)
 
         self.in_dim = 2 * (
@@ -646,6 +660,10 @@ class ThetaNet(ISACNetBase):
         self.fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
         self.fc3 = nn.Linear(2 * hidden_dim, hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, self.out_dim)
+
+        # 新增 設置初始bias=0
+        for layer in [self.fc1,self.fc2,self.fc3,self.fc_out]:
+            nn.init.zeros_(layer.bias)
         
     def forward_mlp(self, x):
         x = F.relu(self.fc1(x))
@@ -683,10 +701,10 @@ class ThetaNet(ISACNetBase):
         g_dt_hat_pl = normalize_complex_block(g_dt_hat_pl)
         """
 
-        h_dk_hat_pl = 10000 * (h_dk_hat_pl)
-        h_rk_hat_pl = 100   * (h_rk_hat_pl)
-        G_hat_pl    = 10000 * (G_hat_pl)
-        g_dt_hat_pl = 1000  * (g_dt_hat_pl)
+        h_dk_hat_pl = 2.8e4 * (h_dk_hat_pl)
+        h_rk_hat_pl = 1.5e2   * (h_rk_hat_pl)
+        G_hat_pl    = 4.0e3 * (G_hat_pl)
+        g_dt_hat_pl = 1.0e3  * (g_dt_hat_pl)
 
         B = h_dk_hat_pl.shape[0]
 
