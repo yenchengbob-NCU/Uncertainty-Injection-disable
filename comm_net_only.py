@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
-from baseline import make_rzf_beamformer, mrt_in_H_eff_H_nullspace, RZF_LAMBDA
-from one_timescale_NN import ThetaNet
+from baseline import mrt_in_H_eff_H_nullspace
+from one_timescale_NN import CommNet, ThetaNet
 
 # ================================
 # Helpers
@@ -18,11 +18,9 @@ def fmt_vec(x, precision=4):
     return "{" + " ".join([f"[{float(v):.{precision}f}]" for v in x]) + "}"
 
 
-def fmt_vec_sci(x, precision=4):
+def fmt_vec_sci(x, precision=3):
     x = np.asarray(x).reshape(-1)
-    return "{" + " ".join(
-        [f"[{float(v):.{precision}e}]" for v in x]
-    ) + "}"
+    return "{" + " ".join([f"[{float(v):.{precision}e}]" for v in x]) + "}"
 
 
 def moving_average(x, window):
@@ -61,11 +59,16 @@ def beamformers_power_split(W_C, W_R):
     return W_C, W_R
 
 
-def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
+def plot_pretrain_curves(reg_curve_path, reg_curve_dir, ma_window=20):
     """
-    畫兩類圖：
+    畫三類圖：
     1. Train / Validation Loss
     2. Train / Validation Nominal worst-UE rate
+    3. 每個 UE 分開畫 SINR power components，共 8 條線：
+       Train / Val signal
+       Train / Val communication interference
+       Train / Val radar interference
+       Train / Val noise
     """
     data = np.load(reg_curve_path)
     out_dir = reg_curve_dir
@@ -187,6 +190,107 @@ def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
 
     print(f"[PLOT] Saved: {fig2_path}")
 
+    # ================================
+    # Fig. 3: SINR Power Components
+    # 每個 UE 分開畫
+    # ================================
+    train_signal_power = data["train_signal_power"]              # (epochs,K)
+    val_signal_power = data["val_signal_power"]                   # (epochs,K)
+
+    train_comm_interf_power = data["train_comm_interf_power"]     # (epochs,K)
+    val_comm_interf_power = data["val_comm_interf_power"]         # (epochs,K)
+
+    train_radar_interf_power = data["train_radar_interf_power"]   # (epochs,K)
+    val_radar_interf_power = data["val_radar_interf_power"]       # (epochs,K)
+
+    train_noise_power = data["train_noise_power"]                 # (epochs,)
+    val_noise_power = data["val_noise_power"]                     # (epochs,)
+
+    num_users = train_signal_power.shape[1]
+
+    for ue_idx in range(num_users):
+        plt.figure(figsize=(12, 7))
+
+        # Signal power
+        plt.plot(
+            epochs,
+            train_signal_power[:, ue_idx],
+            label="Train Signal",
+            linewidth=1.8,
+        )
+        plt.plot(
+            epochs,
+            val_signal_power[:, ue_idx],
+            label="Validation Signal",
+            linewidth=1.8,
+            linestyle="--",
+        )
+
+        # Communication interference power
+        plt.plot(
+            epochs,
+            train_comm_interf_power[:, ue_idx],
+            label="Train Communication Interference",
+            linewidth=1.8,
+        )
+        plt.plot(
+            epochs,
+            val_comm_interf_power[:, ue_idx],
+            label="Validation Communication Interference",
+            linewidth=1.8,
+            linestyle="--",
+        )
+
+        # Radar interference power
+        plt.plot(
+            epochs,
+            train_radar_interf_power[:, ue_idx],
+            label="Train Radar Interference",
+            linewidth=1.8,
+        )
+        plt.plot(
+            epochs,
+            val_radar_interf_power[:, ue_idx],
+            label="Validation Radar Interference",
+            linewidth=1.8,
+            linestyle="--",
+        )
+
+        # Noise power
+        plt.plot(
+            epochs,
+            train_noise_power,
+            label="Train Noise",
+            linewidth=1.8,
+        )
+        plt.plot(
+            epochs,
+            val_noise_power,
+            label="Validation Noise",
+            linewidth=1.8,
+            linestyle="--",
+        )
+
+        # 功率跨越多個數量級，用 logarithmic y-axis
+        plt.yscale("log")
+
+        plt.xlabel("Epoch")
+        plt.ylabel("Power (linear scale)")
+        plt.title(
+            f"Fig. 3: One-timescale REG SINR Power Components — UE {ue_idx}"
+        )
+        plt.grid(True, which="both", alpha=0.35)
+        plt.legend()
+        plt.tight_layout()
+
+        fig3_path = os.path.join(
+            out_dir,
+            f"Fig3_UE{ue_idx}_sinr_power_components.png",
+        )
+        plt.savefig(fig3_path, dpi=300)
+        plt.close()
+
+        print(f"[PLOT] Saved: {fig3_path}")
 
 # ================================
 # Main
@@ -194,7 +298,7 @@ def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
 if __name__ == "__main__":
 
     # 這裡不使用net 只是要用neural_net.py的副函式
-    physics_net = ThetaNet().to(DEVICE)
+    physics_net = CommNet().to(DEVICE)
     physics_net.eval()
 
     # 讀取資料
@@ -209,20 +313,21 @@ if __name__ == "__main__":
     print(f"[INFO] val_dataset_path   = {val_dataset_path}")
 
     # ================================
-    # Train RIS net only
+    # Train comm only
     # ================================
+    comm_net  = CommNet().to(DEVICE)
     theta_net = ThetaNet().to(DEVICE)
 
-    optimizer = optim.Adam(list(theta_net.parameters()),lr=REG_LEARNING_RATE)
+    optimizer = optim.Adam(list(comm_net.parameters()),lr=REG_LEARNING_RATE)    # 只訓練comm
 
-    pre_theta_ckpt = os.path.join(PRETRAIN_DIR, "ris_only.ckpt")
-    pre_curve_path = os.path.join(PRETRAIN_DIR, "ris_only.npz")
-    pre_curve_dir  = os.path.join(PRETRAIN_DIR, "ris_only")
+    pre_comm_ckpt  = os.path.join(PRETRAIN_DIR, "comm_only.ckpt")
+    pre_curve_path = os.path.join(PRETRAIN_DIR, "comm_only.npz")
+    pre_curve_dir  = os.path.join(PRETRAIN_DIR, "comm_only")
 
     os.makedirs(pre_curve_dir, exist_ok=True)
 
     curves = {
-        "train_loss": [],               # Loss function
+        "train_loss": [],               # Loss function 看收斂
         "val_loss": [],
 
         "train_nominal": [],            # Nominal ≜ 先找出K個UE中 worst UE rate,再對B channel平均
@@ -233,12 +338,28 @@ if __name__ == "__main__":
 
         "train_sensing_penalty": [],    # 感測懲罰 不畫圖
         "val_sensing_penalty": [],
+
+        # SINR power components
+        # signal / interference 每個 epoch 儲存 (K,)
+        "train_signal_power": [],
+        "val_signal_power": [],
+
+        "train_comm_interf_power": [],
+        "val_comm_interf_power": [],
+
+        "train_radar_interf_power": [],
+        "val_radar_interf_power": [],
+
+        # noise 每個 epoch 儲存 scalar
+        "train_noise_power": [],
+        "val_noise_power": [],
+
     }
 
 
     # 訓練參數
-    best_val_loss = float("inf")   # L_best <- infinity
-    best_val_worstUE_rate = 0.0    # best loss 對應的 validation sumrate
+    best_val_loss = float("inf")   # L_best <- infinity loss 越小越好 先設無限大
+    best_val_worstUE_rate = 0.0    # best loss 對應的 Nominal worst-UE rate
     best_valtarget_snr_db = 0.0
     best_val_epoch = 0             # best loss 出現在哪個 epoch
 
@@ -250,40 +371,65 @@ if __name__ == "__main__":
     train_channels = train_dataset["h_dk_hat"].shape[0]
     val_channels   = val_dataset["h_dk_hat"].shape[0]
 
+
+    #載入theta net權重
+    """
+    這裡我們只訓練comm net
+    """
+    ris_only_ckpt  = os.path.join(PRETRAIN_DIR, "ris_only.ckpt")
+    if not os.path.exists(ris_only_ckpt):
+        raise FileNotFoundError(f"找不到 ThetaNet checkpoint: {ris_only_ckpt}")
+
+    theta_net.load_model(ris_only_ckpt,strict=True,verbose=True)
+    theta_net.eval()
+
+    for parameter in theta_net.parameters():
+        parameter.requires_grad_(False)
+
+    print(f"[INFO] Loaded pretrained ThetaNet: {ris_only_ckpt}")
+    print("[INFO] ThetaNet is frozen during CommNet pretraining.")
+
     # 開始訓練
-    for epoch in trange(REG_EPOCHS, desc="REG Training"):
+    for epoch in trange(REG_EPOCHS, desc="CommNet pre Training"):
         
-        theta_net.train()
-        # 一個batch 產生一個 loss 更新一次網路
+        comm_net.train()
+
+        # 一個batch 產生一個 loss 更新一次網路,這裡累積要在 epoch log 輸出的值,最後在印出時做平均
         epoch_loss              = []    # 累積N個batch的loss
         epoch_Nominal           = []    # 累積N個batch的Nominal
-        epoch_target_snr        = []
+        epoch_target_snr        = []    
         epoch_sensing_penalties = []
+        epoch_signal_power      = []
+        epoch_comm_interf_power = []
+        epoch_radar_interf_power= []
+        epoch_noise_power       = []
 
+        # 一個epoch 有 N_BATCHE 個 batch , 一個 batch 有BATCH_CHANNELS個估測通道
         for _ in range(N_BATCHE):
             
             # 從data中抽出 BATCH_CHANNELS 個估計通道
             channel_ids = np.random.choice(train_channels,size=BATCH_CHANNELS,replace=False)
 
-            h_dk_hat = torch.as_tensor(train_dataset["h_dk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            h_rk_hat = torch.as_tensor(train_dataset["h_rk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            G_hat    = torch.as_tensor(train_dataset["G_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            g_dt_hat = torch.as_tensor(train_dataset["g_dt_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
+            h_dk_hat = torch.as_tensor(train_dataset["h_dk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, M, K)
+            h_rk_hat = torch.as_tensor(train_dataset["h_rk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, N, K)
+            G_hat    = torch.as_tensor(train_dataset["G_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)     # (B, N, M)
+            g_dt_hat = torch.as_tensor(train_dataset["g_dt_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, M, 1)
 
             optimizer.zero_grad(set_to_none=True)   # 清除梯度，避免上一個 batch 的梯度殘留
 
-            theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
+            # 取得theta
+            with torch.no_grad():
+                theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
 
             H_eff_H = physics_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
 
-            W_C_raw = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_raw
-
-            W_R_raw = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt_hat)           # 這裡輸出功率正規化 W_R_raw
+            # 輸入網路
+            W_C_raw = comm_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)    # 正規化
+            W_R_raw = mrt_in_H_eff_H_nullspace(H_eff_H,g_dt_hat)    # 正規化
 
             W_C,W_R = beamformers_power_split(W_C_raw,W_R_raw)      # power 分配
 
-            
-            metrics = theta_net.compute_isac_batch_performance(H_eff_H,g_dt_hat,W_C,W_R)
+            metrics = comm_net.compute_isac_batch_performance(H_eff_H,g_dt_hat,W_C,W_R)
             """ 輸出結果 :
                     SINR power components:
                         signal       : (B, K)
@@ -311,18 +457,27 @@ if __name__ == "__main__":
             # 取輸出結果
             nominal_allUE_rate      = metrics["rate"]                               # (B,K)  所有UE在每筆估測通道的rate
             nominal_target_snr      = metrics["target_snr"]                         # (B,)   每一筆估測通道(線性，因為要線性平均後在計算)
-            
+
+            nominal_signal          = metrics["signal"]                             # (B,K)  各UE的signal power
+            nominal_comm_interf     = metrics["comm_interf"]                        # (B,K)  
+            nominal_radar_interf    = metrics["radar_interf"]                       # (B,K)
+            nominal_noise           = metrics["noise"]                              # scalar
+
             # Nominal 計算
             nominal_with_batch    = torch.min(nominal_allUE_rate, dim=1).values     # (B,)   每一筆估測通道，找出所有UE中 rate中最小的
             nominal = torch.mean(nominal_with_batch)                                # scalar 對B筆估測通道min-rate平均
+
+            # SINR組成 
+            signal_power         = torch.mean(nominal_signal,dim=0)                 #(K,)
+            comm_interf_power    = torch.mean(nominal_comm_interf, dim=0)           #(K,)
+            radar_interf_power   = torch.mean(nominal_radar_interf, dim=0)          #(K,)
 
             # Nominal target SNR：先計算目前batch的linear mean
             nominal_target_snr_mean = torch.mean(nominal_target_snr)       # scalar, linear
 
             # 感測懲罰：每個channel使用linear SNR計算violation，再對batch平均
             sensing_violation = torch.relu(SENSING_SNR_THRESHOLD - nominal_target_snr)  # (B,)
-            sensing_penalty = torch.mean(sensing_violation)   
-
+            sensing_penalty = torch.mean(sensing_violation)                             # scalar
 
             # loss function
             loss = -(nominal) + REG_SENSING_LOSS_WEIGHT  * sensing_penalty
@@ -330,10 +485,16 @@ if __name__ == "__main__":
             loss.backward()     # 反向傳播
             optimizer.step()    # 更新NN權重
 
+            # 累加在 epoch 向量，供 epoch log 顯示
             epoch_loss.append(float(loss.detach().cpu()))
             epoch_Nominal.append(float(nominal.detach().cpu()))
-            epoch_target_snr.append(float(nominal_target_snr_mean.detach().cpu()))     
+            epoch_target_snr.append(float(nominal_target_snr_mean.detach().cpu()))
             epoch_sensing_penalties.append(float(sensing_penalty.detach().cpu()))
+
+            epoch_signal_power.append(signal_power.detach().cpu().numpy())              
+            epoch_comm_interf_power.append(comm_interf_power.detach().cpu().numpy())    
+            epoch_radar_interf_power.append(radar_interf_power.detach().cpu().numpy())  
+            epoch_noise_power.append(float(nominal_noise.detach().cpu()))
 
         train_target_snr_mean = float(np.mean(epoch_target_snr))
         train_target_snr_mean_db = 10.0 * np.log10(max(train_target_snr_mean,1e-12))
@@ -343,12 +504,17 @@ if __name__ == "__main__":
             "nominal": float(np.mean(epoch_Nominal)),
             "target_snr_db": train_target_snr_mean_db,
             "sensing_penalty": float(np.mean(epoch_sensing_penalties)),
+
+            "signal_power": np.mean(np.stack(epoch_signal_power, axis=0), axis=0),
+            "comm_interf_power": np.mean(np.stack(epoch_comm_interf_power, axis=0), axis=0),
+            "radar_interf_power": np.mean(np.stack(epoch_radar_interf_power, axis=0), axis=0),
+            "noise_power": float(np.mean(epoch_noise_power)),
         }
 
         # ================================
         # Validation: 固定 layout 的全部 val channels
         # ================================
-        theta_net.eval()
+        comm_net.eval()
 
         with torch.no_grad():
             h_dk_val = torch.as_tensor(val_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)
@@ -356,18 +522,19 @@ if __name__ == "__main__":
             G_val    = torch.as_tensor(val_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)
             g_dt_val = torch.as_tensor(val_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)
 
-
+            # 使用已經訓練的RIS net 拿到theta
             theta_val = theta_net(h_dk_val,h_rk_val,G_val,g_dt_val)
 
-            H_eff_val   = theta_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
+            H_eff_val   = comm_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
 
-            W_C_val_raw = make_rzf_beamformer(H_eff_val,RZF_LAMBDA)
-            W_R_val_raw = mrt_in_H_eff_H_nullspace(H_eff_val, g_dt_val)
+            # 輸入網路
+            W_C_val_raw = comm_net(h_dk_val,h_rk_val,G_val,g_dt_val)
 
-            W_C_val, W_R_val = beamformers_power_split(W_C_val_raw,W_R_val_raw)
+            W_R_val_raw = mrt_in_H_eff_H_nullspace(H_eff_val,g_dt_val)
 
-            
-            val_metrics = theta_net.compute_isac_batch_performance(H_eff_val,g_dt_val,W_C_val,W_R_val)
+            W_C_val, W_R_val = beamformers_power_split(W_C_val_raw,W_R_val_raw)     # power 分配
+
+            val_metrics = comm_net.compute_isac_batch_performance(H_eff_val,g_dt_val,W_C_val,W_R_val)
             """ 輸出結果 :
                     SINR power components:
                         signal       : (B, K)
@@ -391,15 +558,25 @@ if __name__ == "__main__":
                         target_snr_mean     : scalar, linear
                         target_snr_mean_db  : scalar, dB = 10log10(mean linear target SNR)
             """
-    
+
             # 取輸出結果
             val_nominal_allUE_rate      = val_metrics["rate"]                            # (B,K) 所有UE在每筆估測通道的rate
             val_nominal_target_snr      = val_metrics["target_snr"]                      # (B,) 每一筆估測通道的target SNR，linear
 
+            val_nominal_signal          = val_metrics["signal"]                          # (B,K) 各UE的signal power
+            val_nominal_comm_interf     = val_metrics["comm_interf"]                     # (B,K)
+            val_nominal_radar_interf    = val_metrics["radar_interf"]                    # (B,K)
+            val_nominal_noise           = val_metrics["noise"]                           # scalar
+
             # Nominal計算
             val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=1).values     # (B,) 每一筆估測通道找出所有UE中rate最小的
             val_nominal = torch.mean(val_nominal_with_batch)                            # scalar 對B筆估測通道min-rate平均
-            
+
+            # SINR組成
+            val_signal_power = torch.mean(val_nominal_signal,dim=0)                     # (K,)
+            val_comm_interf_power = torch.mean(val_nominal_comm_interf,dim=0)           # (K,)
+            val_radar_interf_power = torch.mean(val_nominal_radar_interf,dim=0)         # (K,)
+
             # Nominal target SNR：linear mean後轉dB
             val_nominal_target_snr_mean = torch.mean(val_nominal_target_snr)            # scalar, linear
             val_target_snr_mean_db = 10.0 * torch.log10(val_nominal_target_snr_mean.clamp_min(1e-12))
@@ -409,14 +586,19 @@ if __name__ == "__main__":
             val_sensing_penalty = torch.mean(val_sensing_violation)                             # scalar
 
             # Loss function
-            val_loss = -(val_nominal) + REG_SENSING_LOSS_WEIGHT * val_sensing_penalty
-            
-            val_logs = {
-                "loss": float(val_loss.detach().cpu()),
-                "nominal": float(val_nominal.detach().cpu()),
-                "target_snr_db": float(val_target_snr_mean_db.detach().cpu()),
-                "sensing_penalty": float(val_sensing_penalty.detach().cpu()),
-            }
+            val_loss = -val_nominal + REG_SENSING_LOSS_WEIGHT * val_sensing_penalty
+
+        val_logs = {
+            "loss": float(val_loss.detach().cpu()),
+            "nominal": float(val_nominal.detach().cpu()),
+            "target_snr_db": float(val_target_snr_mean_db.detach().cpu()),
+            "sensing_penalty": float(val_sensing_penalty.detach().cpu()),
+
+            "signal_power": val_signal_power.detach().cpu().numpy(),
+            "comm_interf_power": val_comm_interf_power.detach().cpu().numpy(),
+            "radar_interf_power": val_radar_interf_power.detach().cpu().numpy(),
+            "noise_power": float(val_nominal_noise.detach().cpu()),
+        }
 
         curves["train_loss"].append(train_logs["loss"])
         curves["val_loss"].append(val_logs["loss"])
@@ -429,6 +611,18 @@ if __name__ == "__main__":
 
         curves["train_sensing_penalty"].append(train_logs["sensing_penalty"])
         curves["val_sensing_penalty"].append(val_logs["sensing_penalty"])
+
+        curves["train_signal_power"].append(train_logs["signal_power"].copy())
+        curves["val_signal_power"].append(val_logs["signal_power"].copy())
+
+        curves["train_comm_interf_power"].append(train_logs["comm_interf_power"].copy())
+        curves["val_comm_interf_power"].append(val_logs["comm_interf_power"].copy())
+
+        curves["train_radar_interf_power"].append(train_logs["radar_interf_power"].copy())
+        curves["val_radar_interf_power"].append(val_logs["radar_interf_power"].copy())
+
+        curves["train_noise_power"].append(train_logs["noise_power"])
+        curves["val_noise_power"].append(val_logs["noise_power"])
 
         np.savez(
             pre_curve_path,
@@ -446,7 +640,7 @@ if __name__ == "__main__":
 
             patience_counter = 0
 
-            theta_net.save_model(pre_theta_ckpt, verbose=False)
+            comm_net.save_model(pre_comm_ckpt, verbose=False)
         else:
             patience_counter += 1
         if patience_counter >= PATIENCE:
@@ -470,22 +664,35 @@ if __name__ == "__main__":
             f"TrainTarSNR={train_logs['target_snr_db']:.3f} dB "
             f"ValTarSNR={val_logs['target_snr_db']:.3f} dB | "
 
-            f"\nTrainpenalty={train_logs['sensing_penalty']:.3f} "
-            f"Valpenalty={val_logs['sensing_penalty']:.3f} | "
+            f"\nTrainSignal={fmt_vec_sci(train_logs['signal_power'], precision=3)} "
+            f"ValSignal={fmt_vec_sci(val_logs['signal_power'], precision=3)} "
+
+            f"\nTrainCommInterf={fmt_vec_sci(train_logs['comm_interf_power'], precision=3)} "
+            f"ValCommInterf={fmt_vec_sci(val_logs['comm_interf_power'], precision=3)} "
+
+            f"\nTrainRadarInterf={fmt_vec_sci(train_logs['radar_interf_power'], precision=3)} "
+            f"ValRadarInterf={fmt_vec_sci(val_logs['radar_interf_power'], precision=3)} "
+
+            f"\nTrainNoise={train_logs['noise_power']:.3e} "
+            f"ValNoise={val_logs['noise_power']:.3e}"
         )
 
-    plot_RISNET_only_curves(pre_curve_path,pre_curve_dir)
-
-
+    plot_pretrain_curves(pre_curve_path,pre_curve_dir)
 
     print("\n[INFO] One-timescale REG training finished.")
-    print(f"Sensing SNR threshold             = {SENSING_SNR_THRESHOLD_DB} dB")
-    print(f"Sensing penalty weight            = {REG_SENSING_LOSS_WEIGHT}")
-
+    print(f"Train channels          : {train_channels}")
+    print(f"Val channels            : {val_channels}")
+    print(f"REG_EPOCHS              : {REG_EPOCHS}")
+    print(f"N_BATCHE                : {N_BATCHE}")
+    print(f"BATCH_CHANNELS          : {BATCH_CHANNELS}")
+    print(f"REG learning rate       : {REG_LEARNING_RATE}")
+    print(f"Sensing SNR threshold   : {SENSING_SNR_THRESHOLD_DB} dB")
+    print(f"Sensing penalty weight  : {REG_SENSING_LOSS_WEIGHT}")
+    print("=" * 90)
     print(f"[INFO] Best validation epoch      = {best_val_epoch}")
     print(f"[INFO] Best validation loss       = {best_val_loss:.6f}")
-    print(f"[INFO] Nominal worst-UE rate      = {best_val_worstUE_rate:.6f}")
-    print(f"[INFO] Nominal target snr db      = {best_valtarget_snr_db:.3f} dB")         
+    print(f"[INFO] Best Nominal worst-UE rate = {best_val_worstUE_rate:.6f}")
+    print(f"[INFO] Nominal target snr db      = {best_valtarget_snr_db:.3f} dB")       
     print("[INFO] Short-term regular training finished.")
 
 

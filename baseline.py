@@ -36,97 +36,112 @@ def make_random_ris(B):
 
 def make_rzf_beamformer(H_eff_H, lambda_reg):
     """
-    Downlink RZF precoder based on Cell-Free ISAC Eq. (18).
+    Cell-Free ISAC Eq. (18): RZF communication beamformer.
 
     Math:
-        W_C = H^H (H H^H + lambda I_K)^(-1)
+        H_eff = (H_eff_H)^H
+        W_C_raw = (H_eff H_eff^H + lambda I_M)^(-1) H_eff
+        w_C,k = w_C,k_raw / ||w_C,k_raw||
 
     Input:
-        H_eff_H   : (B, K, M)
-            Effective channel matrix H.
+        H_eff_H : (B,K,M)
+            Effective communication channel matrix H_eff^H.
             Each row is h_eff,k^H.
 
         lambda_reg:
             RZF regularization parameter lambda.
-            lambda_reg = 0 gives ZF-like precoder if H H^H is invertible.
 
     Return:
-        W_C       : (B, M, K)
+        W_C_dir : (B,M,K)
+            Each user beam is individually normalized to unit norm.
+            Communication power is assigned later.
     """
 
-    H = torch.as_tensor(H_eff_H,dtype=torch.complex64,device=DEVICE)                    # (B,K,M)
-    lambda_reg = torch.as_tensor(lambda_reg,dtype=torch.float32,device=DEVICE)          # scalar
+    H_eff_H    = torch.as_tensor(H_eff_H,dtype=torch.complex64,device=DEVICE)          # (B,K,M)
+    lambda_reg = torch.as_tensor(lambda_reg,dtype=torch.float32,device=DEVICE)         # scalar
 
-    B = H.shape[0]
-    K = H.shape[1]
+    B,K,M = H_eff_H.shape
 
-    Hh = torch.conj(H).transpose(1, 2)                                                  # (B,M,K)
+    # H_eff = (H_eff^H)^H
+    H_eff = torch.conj(H_eff_H).transpose(1,2)                                        # (B,M,K)
 
-    gram = torch.matmul(H, Hh)                                                          # (B,K,K)
+    # I_M
+    I_M = torch.eye(M,dtype=torch.complex64,device=DEVICE).unsqueeze(0).expand(B,M,M)  # (B,M,M)
 
-    eye = torch.eye(K,dtype=torch.complex64,device=DEVICE).unsqueeze(0).expand(B, K, K) # (B,K,K)
+    # H_eff H_eff^H
+    H_eff_H_eff_H = torch.matmul(H_eff,H_eff_H)                                       # (B,M,M)
 
-    reg_gram = gram + lambda_reg * eye                                                  # (B,K,K)
+    # H_eff H_eff^H + lambda I_M
+    RZF_matrix = H_eff_H_eff_H + lambda_reg * I_M                                     # (B,M,M)
 
-    inv_part = torch.linalg.solve(reg_gram,eye)                                         # (B,K,K)
+    # (H_eff H_eff^H + lambda I_M)^(-1)
+    RZF_matrix_inv = torch.linalg.inv(RZF_matrix)                                     # (B,M,M)
 
-    W_C = torch.matmul(Hh, inv_part)                                                    # (B,M,K)
+    # W_C_raw = (H_eff H_eff^H + lambda I_M)^(-1) H_eff
+    W_C_raw = torch.matmul(RZF_matrix_inv,H_eff)                                      # (B,M,K)
 
-    W_C_dir = W_C / (torch.sqrt(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
+    W_C_dir = W_C_raw / (torch.sqrt(torch.sum(torch.abs(W_C_raw) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
 
-    return W_C_dir  # (B,M,K)
+    return W_C_dir
 
 
 def mrt_in_H_eff_H_nullspace(H_eff_H, g_dt):
     """
-    Downlink RZF precoder based on Cell-Free ISAC Eq. (17)
+    Cell-Free ISAC Eq. (17): nullspace conjugate sensing beamformer.
 
     Math:
-        P_NS = I_M - H^† H
+        H_eff = (H_eff_H)^H
+        P_NS = I_M - H_eff (H_eff^H H_eff)^dagger H_eff^H
         W_R_raw = P_NS g_dt
         W_R = W_R_raw / ||W_R_raw||
 
     Input:
-        H_eff_H : (B, K, M)
-            Effective communication channel matrix H.
+        H_eff_H : (B,K,M)
+            Effective communication channel matrix H_eff^H.
             Each row is h_eff,k^H.
 
-        g_dt : (B, M, 1)
-            Target sensing channel direction.
+        g_dt : (B,M,1)
+            Transmit-side target sensing direction.
 
     Return:
-        W_R : (B, M, 1)
+        W_R_dir : (B,M,1)
             Unit-norm sensing beam direction.
-            Power is assigned later by normalize_isac_beamformers().
+            Sensing power is assigned later.
     """
 
-    H = torch.as_tensor(H_eff_H, dtype=torch.complex64, device=DEVICE)   # (B,K,M)
-    g = torch.as_tensor(g_dt, dtype=torch.complex64, device=DEVICE)      # (B,M,1)
+    H_eff_H = torch.as_tensor(H_eff_H,dtype=torch.complex64,device=DEVICE)             # (B,K,M)
+    g_dt = torch.as_tensor(g_dt,dtype=torch.complex64,device=DEVICE)                   # (B,M,1)
 
-    B = H.shape[0]
-    M = H.shape[2]
+    B,K,M = H_eff_H.shape
 
-    eye = torch.eye(
-        M,
-        dtype=torch.complex64,
-        device=DEVICE,
-    ).unsqueeze(0).expand(B, M, M)                    # (B,M,M)
+    # H_eff = (H_eff^H)^H
+    H_eff = torch.conj(H_eff_H).transpose(1,2)                                        # (B,M,K)
 
-    # Projector onto nullspace of H_eff_H:
-    # P_NS = I - H^+ H
-    H_pinv = torch.linalg.pinv(H)                    # (B,M,K)
-    P_NS = eye - torch.matmul(H_pinv, H)             # (B,M,M)
+    # I_M
+    I_M = torch.eye(M,dtype=torch.complex64,device=DEVICE).unsqueeze(0).expand(B,M,M)  # (B,M,M)
 
-    # Eq. (17)-style NS-MRT:
-    # w_R = P_NS g_dt / ||P_NS g_dt||
-    W_R = torch.matmul(P_NS, g)                      # (B,M,1)
+    # H_eff^H H_eff
+    H_eff_H_H_eff = torch.matmul(H_eff_H,H_eff)                                       # (B,K,K)
 
-    W_R_norm = torch.linalg.norm(W_R, dim=1, keepdim=True)
-    W_R = W_R / torch.clamp(W_R_norm, min=1e-12)
+    # (H_eff^H H_eff)^dagger
+    H_eff_H_H_eff_pinv = torch.linalg.pinv(H_eff_H_H_eff)                             # (B,K,K)
 
-    W_R_dir = W_R / (torch.sqrt(torch.sum(torch.abs(W_R) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
-    
-    return W_R_dir  # (B,M,1)
+    # H_eff (H_eff^H H_eff)^dagger
+    comm_projection_left = torch.matmul(H_eff,H_eff_H_H_eff_pinv)                     # (B,M,K)
+
+    # H_eff (H_eff^H H_eff)^dagger H_eff^H
+    comm_projection = torch.matmul(comm_projection_left,H_eff_H)                      # (B,M,M)
+
+    # P_NS = I_M - H_eff (H_eff^H H_eff)^dagger H_eff^H
+    P_NS = I_M - comm_projection                                                      # (B,M,M)
+
+    # W_R_raw = P_NS g_dt
+    W_R_raw = torch.matmul(P_NS,g_dt)                                                 # (B,M,1)
+
+    # W_R_dir = W_R_raw / ||W_R_raw||_F
+    W_R_dir = W_R_raw / (torch.sqrt(torch.sum(torch.abs(W_R_raw) ** 2,dim=(1,2),keepdim=True).real)+1e-12)
+
+    return W_R_dir
 
 
 def beamformers_power_split(W_C, W_R):
@@ -134,12 +149,6 @@ def beamformers_power_split(W_C, W_R):
     這裡輸入要是正規化後的W_C, W_R
     """
     total_power = torch.as_tensor(TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
-    """
-    舊版code
-    # 先把 W_C, W_R 都變成 direction,消除 raw power 不均問題
-    W_C_dir = W_C / (torch.sqrt(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12)
-    W_R_dir = W_R / (torch.sqrt(torch.sum(torch.abs(W_R) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12)
-    """
 
     # 根據sweep來的power分配
     p_R = total_power * 0.6 

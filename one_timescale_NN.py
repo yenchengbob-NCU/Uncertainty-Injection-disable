@@ -368,7 +368,7 @@ class CommNet(ISACNetBase):
         -> W_C,         shape = (B, M, K), complex , Frobenius-normalized
     """
 
-    def __init__(self, hidden_dim: int = NET, ckpt_kind: str = "shortterm_comm"):
+    def __init__(self, hidden_dim: int = 128, ckpt_kind: str = "shortterm_comm"):
             super().__init__(ckpt_kind)
 
             self.in_dim = 2 * (
@@ -758,90 +758,127 @@ class ThetaNet(ISACNetBase):
         return theta
 
 
-'''
+
 class TestNet(ISACNetBase):
     """
-    NN encoded input:
-        H_eff_H     : (B, K, M), complex
+    Direct effective-channel-to-RZF network.
+
+    Input:
+        H_eff_H : (B,K,M), complex
+
     Output:
-        W_C         : (B, M, K), complex
+        W_C     : (B,M,K), complex
+                  Frobenius-normalized
     """
 
-    def __init__(self, hidden_dim: int = 128 , ckpt_kind: str = "test_net"):
-        in_dim = 2 * (
-            UAV_COMM * TX_ANT             # H_eff_H
-        )                                 # 64 real
-        out_dim = 2 * (TX_ANT * UAV_COMM) # 64 real
+    def __init__(self, hidden_dim: int = 64, ckpt_kind: str = "test_net"):
+        super().__init__(ckpt_kind)
 
-        super().__init__(in_dim, out_dim, hidden_dim, ckpt_kind)
+        self.in_dim = 2 * UAV_COMM * TX_ANT
+        self.hidden_dim = hidden_dim
+        self.out_complex_dim = TX_ANT * UAV_COMM
+
+        self.fc1 = nn.Linear(self.in_dim,hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim,2 * hidden_dim)
+        self.fc3 = nn.Linear(2 * hidden_dim,hidden_dim)
+
+        self.fc_out_real = nn.Linear(hidden_dim,self.out_complex_dim)
+        self.fc_out_imag = nn.Linear(hidden_dim,self.out_complex_dim)
+
+        for layer in [self.fc1,self.fc2,self.fc3,self.fc_out_real,self.fc_out_imag]:
+            nn.init.zeros_(layer.bias)
+
+    def forward_mlp(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+
+        y_real = self.fc_out_real(x)
+        y_imag = self.fc_out_imag(x)
+
+        y = torch.cat([y_real,y_imag],dim=1)
+
+        return y
 
     def encode_channels(self, H_eff_H):
         """
-        將  H_eff_H 轉成 NN real input.
-        H_eff_H     : (B, K, M), complex
-        return:
-            x, shape = (B, input_dim), real
+        H_eff_H : (B,K,M), complex
+
+        Return:
+            x : (B,2*K*M), real
         """
-        H_eff_H     = torch.as_tensor(H_eff_H,     dtype=torch.complex64, device=self.model_device)
+
+        H_eff_H = torch.as_tensor(H_eff_H,dtype=torch.complex64,device=self.model_device)
 
         B = H_eff_H.shape[0]
-        
-        H_eff_H     = 10000 * H_eff_H
-        H_eff_H     = H_eff_H.reshape(B, -1)
+
+        # 固定尺度縮放，不改變不同 channel 間的相對大小
+        H_eff_H_scaled = 1.0e4 * H_eff_H
+        H_eff_H_flat = H_eff_H_scaled.reshape(B,-1)
 
         x = torch.cat(
             [
-                H_eff_H.real,     H_eff_H.imag,
+                H_eff_H_flat.real,
+                H_eff_H_flat.imag,
             ],
             dim=1,
         )
 
-        if Debug:
-            print("[TestNet feature rms]")
-            print("H_eff_H    :", torch.sqrt(torch.mean(torch.abs(H_eff_H) ** 2)).item())
+        if x.shape[1] != self.in_dim:
+            raise RuntimeError(
+                f"TestNet input dimension mismatch: "
+                f"x.shape={tuple(x.shape)}, expected in_dim={self.in_dim}"
+            )
 
         return x
 
-
     def decode_comm_beamformer(self, y):
         """
-        將 NN real output 轉成 communication beamformer W_C.
-        y:
-            shape = (B, 2*M*K), real
-        return:
-            W_C, shape = (B, M, K), complex
+        y   : (B,2*M*K), real
+        W_C : (B,M,K), complex
         """
 
         B = y.shape[0]
 
-        y = y.reshape(B, 2, TX_ANT, UAV_COMM)
+        if y.shape[1] != 2 * self.out_complex_dim:
+            raise RuntimeError(
+                f"TestNet output dimension mismatch: "
+                f"y.shape={tuple(y.shape)}, "
+                f"expected second dimension={2 * self.out_complex_dim}"
+            )
 
-        W_real = y[:, 0]
-        W_imag = y[:, 1]
+        y = y.reshape(B,2,TX_ANT,UAV_COMM)
 
-        W_C = torch.complex(W_real, W_imag).to(torch.complex64)
+        W_real = y[:,0]
+        W_imag = y[:,1]
+
+        W_C = torch.complex(W_real,W_imag).to(torch.complex64)
 
         return W_C
 
-
     def forward(self, H_eff_H):
         """
-        return:
-            W_C, shape = (B, M, K), complex
+        Return:
+            W_C_dir : (B,M,K), complex
+                      ||W_C_dir||_F^2 = 1 for each sample
         """
-        x = self.encode_channels(H_eff_H)
 
+        x = self.encode_channels(H_eff_H)
         y = self.forward_mlp(x)
 
-        W_C = self.decode_comm_beamformer(y)
+        W_C_raw = self.decode_comm_beamformer(y)
 
-        W_C_dir = W_C / (torch.sqrt(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
+        W_C_norm = torch.sqrt(
+            torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2),keepdim=True).real
+        )
+
+        W_C_dir = W_C_raw / (W_C_norm + 1e-12)
 
         return W_C_dir
     
 
 
 
-'''
+
 
 

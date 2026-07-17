@@ -8,40 +8,43 @@ import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
-from baseline import make_rzf_beamformer, make_random_ris, RZF_LAMBDA
-from one_timescale_NN import CommNet
+from baseline import make_rzf_beamformer, RZF_LAMBDA
+from one_timescale_NN import CommNet, ThetaNet
 
 # ================================
 # Helpers
 # ================================
-PRETRAIN_COMM_INTERF_WEIGHT = 0.1
+PRETRAIN_COMM_INTERF_WEIGHT = 0.0
 
-def comm_pretrain_loss(H_eff_H,W_C_net,W_C_rzf):
+def comm_pretrain_loss(H_eff_H,W_C_net_raw,W_C_rzf_raw):
     """
-    loss = mse_loss + weight * comm_interf_loss
-
-    comm_interf_loss 使用 RZF signal 做正規化，
-    避免原始 comm_interf 數值太小而沒有作用。
+    MSE 比較單位正規化 beamformer。
+    Communication interference 使用實際 communication power：
+        P_C = 0.4 * TRANSMIT_POWER_TOTAL
     """
 
     noise = torch.as_tensor(NOISE_POWER,dtype=torch.float32,device=DEVICE)
+    p_C   = torch.as_tensor(0.4 * TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
 
-    mse_loss = torch.mean(torch.abs(W_C_net - W_C_rzf) ** 2)
+    # 單位正規化 beamformer 的 supervised MSE
+    mse_loss = torch.mean(torch.abs(W_C_net_raw - W_C_rzf_raw.detach()) ** 2)
 
-    Y_net = torch.matmul(H_eff_H,W_C_net)                         # (B,K,K)
-    P_net = torch.abs(Y_net) ** 2                                # (B,K,K)
+    # 實際通信功率
+    W_C_net = torch.sqrt(p_C) * W_C_net_raw
+    W_C_rzf = torch.sqrt(p_C) * W_C_rzf_raw
 
-    signal_net = torch.diagonal(P_net,dim1=1,dim2=2)             # (B,K)
-    comm_interf_net = torch.sum(P_net,dim=2) - signal_net        # (B,K)
+    Y_net = torch.matmul(H_eff_H,W_C_net)                       # (B,K,K)
+    P_net = torch.abs(Y_net) ** 2                              # (B,K,K)
+
+    signal_net = torch.diagonal(P_net,dim1=1,dim2=2)           # (B,K)
+    comm_interf_net = torch.sum(P_net,dim=2) - signal_net      # (B,K)
 
     with torch.no_grad():
-        Y_rzf = torch.matmul(H_eff_H,W_C_rzf)                    # (B,K,K)
-        P_rzf = torch.abs(Y_rzf) ** 2                            # (B,K,K)
-        signal_rzf = torch.diagonal(P_rzf,dim1=1,dim2=2)         # (B,K)
+        Y_rzf = torch.matmul(H_eff_H,W_C_rzf)                  # (B,K,K)
+        P_rzf = torch.abs(Y_rzf) ** 2                          # (B,K,K)
+        signal_rzf = torch.diagonal(P_rzf,dim1=1,dim2=2)       # (B,K)
 
-    comm_interf_loss = torch.mean(
-        comm_interf_net / (signal_rzf + noise)
-    )
+    comm_interf_loss = torch.mean(comm_interf_net / (signal_rzf + noise))
 
     loss = mse_loss + PRETRAIN_COMM_INTERF_WEIGHT * comm_interf_loss
 
@@ -284,11 +287,13 @@ if __name__ == "__main__":
     # Pre train comm net
     # ================================
     comm_net  = CommNet().to(DEVICE)
+    theta_net = ThetaNet().to(DEVICE)
     optimizer = optim.Adam(list(comm_net.parameters()),lr=0.001)
 
     pre_comm_ckpt  = os.path.join(PRETRAIN_DIR, "pre_comm_reg.ckpt")
-    pre_curve_path = os.path.join(PRETRAIN_DIR, "pre_curves.npz")
-    pre_curve_dir  = os.path.join(PRETRAIN_DIR, "pre_training_curves")
+    ris_only_ckpt  = os.path.join(PRETRAIN_DIR, "ris_only.ckpt")
+    pre_curve_path = os.path.join(PRETRAIN_DIR, "ris_only.npz")
+    pre_curve_dir  = os.path.join(PRETRAIN_DIR, "ris_only_curves")
 
     os.makedirs(pre_curve_dir, exist_ok=True)
 
@@ -322,7 +327,22 @@ if __name__ == "__main__":
     train_channels = train_dataset["h_dk_hat"].shape[0]
     val_channels   = val_dataset["h_dk_hat"].shape[0]
     
-    theta_fixed = make_random_ris(1)                 # 針對這 layout 建立 1 組 random RIS (B,)
+
+    # 載入已訓練好的 ThetaNet
+    """
+    這裡我們只訓練comm net
+    """
+    if not os.path.exists(ris_only_ckpt):
+        raise FileNotFoundError(f"找不到 ThetaNet checkpoint: {ris_only_ckpt}")
+
+    theta_net.load_model(ris_only_ckpt,strict=True,verbose=True)
+    theta_net.eval()
+
+    for parameter in theta_net.parameters():
+        parameter.requires_grad_(False)
+
+    print(f"[INFO] Loaded pretrained ThetaNet: {ris_only_ckpt}")
+    print("[INFO] ThetaNet is frozen during CommNet pretraining.")
 
     # 開始訓練
     for epoch in trange(pre_epoch, desc="CommNet pre Training"):
@@ -345,15 +365,16 @@ if __name__ == "__main__":
             g_dt_hat = torch.as_tensor(train_dataset["g_dt_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
 
             optimizer.zero_grad(set_to_none=True)   # 清除梯度，避免上一個 batch 的梯度殘留
-
-            theta = theta_fixed.expand(h_dk_hat.shape[0],RIS_UNIT)
-
+            
+            # 使用已經訓練的RIS net 拿到theta
             with torch.no_grad():
+                theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
 
-                H_eff_H = physics_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
-                W_C_rzf = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)       # 這裡輸出功率正規化 W_C_rzf
+            H_eff_H = physics_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
 
-            W_C_net = comm_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)    # 正規化
+            W_C_rzf = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)       # 這裡輸出功率正規化 W_C_rzf
+
+            W_C_net = comm_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)    # 正規化的W_C_net
 
             loss,mse_loss,comm_interf_loss = comm_pretrain_loss(H_eff_H,W_C_net,W_C_rzf)
 
@@ -374,46 +395,89 @@ if __name__ == "__main__":
         # Validation: 固定 layout 的全部 val channels
         # ================================
         comm_net.eval()
+
         with torch.no_grad():
             h_dk_val = torch.as_tensor(val_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)
             h_rk_val = torch.as_tensor(val_dataset["h_rk_hat"],dtype=torch.complex64,device=DEVICE)
             G_val    = torch.as_tensor(val_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)
             g_dt_val = torch.as_tensor(val_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)
 
-            theta_val = theta_fixed.expand(h_dk_val.shape[0],RIS_UNIT)
+            # 使用已經訓練的RIS net 拿到theta
+            theta_val = theta_net(h_dk_val,h_rk_val,G_val,g_dt_val)
 
             H_eff_val   = comm_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
-
-            W_C_net_val = comm_net(h_dk_val,h_rk_val,G_val,g_dt_val)    # 正規化
-
             W_C_rzf_val = make_rzf_beamformer(H_eff_val,RZF_LAMBDA)     # 這裡輸出功率正規化 W_C_rzf
+            
+            # 輸入網路
+            W_C_net_val = comm_net(h_dk_val,h_rk_val,G_val,g_dt_val)    # 正規化的W_C_net
 
-            val_net_metrics = compute_comm_only_rate(H_eff_val,W_C_net_val)
-            val_rzf_metrics = compute_comm_only_rate(H_eff_val,W_C_rzf_val)
+            # power分配4成
+            p_C = torch.as_tensor(0.4 * TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
 
-            val_net_worstUE_rate_mean = val_net_metrics["worstUE_rate_mean"]  # scalar
-            val_rzf_worstUE_rate_mean = val_rzf_metrics["worstUE_rate_mean"]  # scalar
+            W_C_net_val_power = torch.sqrt(p_C) * W_C_net_val
+            W_C_rzf_val_power = torch.sqrt(p_C) * W_C_rzf_val
 
-            val_net_rate_user_mean = val_net_metrics["rate_user_mean"]        # (K,)
-            val_rzf_rate_user_mean = val_rzf_metrics["rate_user_mean"]        # (K,)
+            val_net_metrics = compute_comm_only_rate(H_eff_val,W_C_net_val_power)
+            val_rzf_metrics = compute_comm_only_rate(H_eff_val,W_C_rzf_val_power)
+            """ 輸出結果 :
+                    rate              : (B,K)
+                    worstUE_rate      : (B,)
+                    worstUE_rate_mean : scalar
+                    rate_user_mean    : (K,)
+                    signal            : (B,K)
+                    comm_interf       : (B,K)
+                    sinr              : (B,K)
+            """
 
-            val_net_signal_mean = torch.mean(val_net_metrics["signal"],dim=0)              # (K,)
-            val_rzf_signal_mean = torch.mean(val_rzf_metrics["signal"],dim=0)              # (K,)
+            # 取輸出結果
+            val_nominal_allUE_rate = val_net_metrics["rate"]          # (B,K)
+            val_rzf_nominal_allUE_rate = val_rzf_metrics["rate"]      # (B,K)
 
-            val_net_comm_interf_mean = torch.mean(val_net_metrics["comm_interf"],dim=0)    # (K,)
-            val_rzf_comm_interf_mean = torch.mean(val_rzf_metrics["comm_interf"],dim=0)    # (K,)
+            val_net_signal = val_net_metrics["signal"]                # (B,K)
+            val_rzf_signal = val_rzf_metrics["signal"]                # (B,K)
 
+            val_net_comm_interf = val_net_metrics["comm_interf"]      # (B,K)
+            val_rzf_comm_interf = val_rzf_metrics["comm_interf"]      # (B,K)
+
+
+            # Nominal 計算
+            val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=1).values      # (B,)
+            val_nominal = torch.mean(val_nominal_with_batch)                             # scalar
+
+            val_rzf_nominal_with_batch = torch.min(val_rzf_nominal_allUE_rate,dim=1).values  # (B,)
+            val_rzf_nominal = torch.mean(val_rzf_nominal_with_batch)                         # scalar
+
+            # 顯示用：各 UE 對 B channels 平均
+            val_net_rate_user_mean = torch.mean(val_nominal_allUE_rate,dim=0)             # (K,)
+            val_rzf_rate_user_mean = torch.mean(val_rzf_nominal_allUE_rate,dim=0)         # (K,)
+
+            val_net_signal_mean = torch.mean(val_net_signal,dim=0)                        # (K,)
+            val_rzf_signal_mean = torch.mean(val_rzf_signal,dim=0)                        # (K,)
+
+            val_net_comm_interf_mean = torch.mean(val_net_comm_interf,dim=0)              # (K,)
+            val_rzf_comm_interf_mean = torch.mean(val_rzf_comm_interf,dim=0)              # (K,)
 
             val_loss,val_mse_loss,val_comm_interf_loss = comm_pretrain_loss(H_eff_val,W_C_net_val,W_C_rzf_val,)
 
-            val_logs = {
-                "loss": float(val_loss.detach().cpu()),
-                "mse_loss": float(val_mse_loss.detach().cpu()),
-                "comm_interf_loss": float(val_comm_interf_loss.detach().cpu()),
+        val_logs = {
+            "loss": float(val_loss.detach().cpu()),
+            "mse_loss": float(val_mse_loss.detach().cpu()),
+            "comm_interf_loss": float(val_comm_interf_loss.detach().cpu()),
 
-                "net_worstUE_rate": float(val_net_worstUE_rate_mean.detach().cpu()),
-                "rzf_worstUE_rate": float(val_rzf_worstUE_rate_mean.detach().cpu()),
-            }
+            # Nominal = mean_B(min_K(rate))
+            "net_worstUE_rate": float(val_nominal.detach().cpu()),
+            "rzf_worstUE_rate": float(val_rzf_nominal.detach().cpu()),
+
+            # 顯示用：mean_B(rate_k)
+            "net_rate_user": val_net_rate_user_mean.detach().cpu().numpy(),
+            "rzf_rate_user": val_rzf_rate_user_mean.detach().cpu().numpy(),
+
+            "net_signal_user": val_net_signal_mean.detach().cpu().numpy(),
+            "rzf_signal_user": val_rzf_signal_mean.detach().cpu().numpy(),
+
+            "net_comm_interf_user": val_net_comm_interf_mean.detach().cpu().numpy(),
+            "rzf_comm_interf_user": val_rzf_comm_interf_mean.detach().cpu().numpy(),
+        }
 
         curves["train_loss"].append(train_logs["loss"])
         curves["val_loss"].append(val_logs["loss"])
@@ -472,9 +536,18 @@ if __name__ == "__main__":
             f"TrainCommLoss={train_logs['comm_interf_loss']:.6e} "
             f"ValCommLoss={val_logs['comm_interf_loss']:.6e} | "
 
-            f"ValNetRate={val_logs['net_worstUE_rate']:.4f} "
-            f"ValRZFRate={val_logs['rzf_worstUE_rate']:.4f} "
-            f"RateRatio={rate_ratio:.4f}"
+            f"ValNetMinRate={val_logs['net_worstUE_rate']:.4f} "
+            f"ValRZFMinRate={val_logs['rzf_worstUE_rate']:.4f} "
+            f"RateRatio={rate_ratio:.4f}\n"
+
+            f"ValNetRateUser={fmt_vec(val_logs['net_rate_user'],precision=4)} "
+            f"ValRZFRateUser={fmt_vec(val_logs['rzf_rate_user'],precision=4)}\n"
+
+            f"ValNetSignal={fmt_vec_sci(val_logs['net_signal_user'],precision=3)} "
+            f"ValRZFSignal={fmt_vec_sci(val_logs['rzf_signal_user'],precision=3)}\n"
+
+            f"ValNetCommInterf={fmt_vec_sci(val_logs['net_comm_interf_user'],precision=3)} "
+            f"ValRZFCommInterf={fmt_vec_sci(val_logs['rzf_comm_interf_user'],precision=3)}"
         )
     plot_pretrain_curves(pre_curve_path,pre_curve_dir)
 
