@@ -3,8 +3,6 @@ import random
 import numpy as np
 import torch
 """
-現在這篇環境是設定UE為固定位置! 我們用ONE TIME SCALE 平行使用3個子網路輸出 { W_C W_R theta }
-
 負責工作:
     1.設定環境與參數
     2.建立階層資料夾
@@ -58,21 +56,21 @@ PL_EXP_BS_TAR   = 2.7               # 單程PL係數 BS  -> TAR
 # ================================
 # 物理與功率參數
 # ================================
-NOISE_POWER             = 1e-10     # 雜訊功率(W) 10^-11 -80dBm
+NOISE_POWER             = 1e-11     # 雜訊功率(W) 10^-11 -80dBm
 TRANSMIT_POWER_TOTAL    = 1.26      # 傳輸功率(W)
 
 # ================================
 # ISAC / 損失權重預設值
 # ================================
-SENSING_SNR_THRESHOLD_DB = 3.75
+SENSING_SNR_THRESHOLD_DB = 4.0
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 
 
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 6.0     # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT  = 1.0     # rob 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 10.0     # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT  = 0.5     # rob 感測懲罰權重
 
 # ================================
 # dataset 生成
@@ -85,9 +83,9 @@ N_TEST_CHANNELS  = 2000
 # Robust / uncertainty injection
 # ================================
 
-INJECTION_VARIANCE = 0.075                # 注入誤差，其平均 power 是原始 normalized channel power 的 7.5%
-INJECTION_SAMPLES  = 200                 # 一個估測通道要有多少誤差通道
-OUTAGE_QUANTILE    = 0.05                 # SNR容許值
+INJECTION_VARIANCE = 0.075          # Error power = 7.5% of each estimated channel block's empirical mean power
+INJECTION_SAMPLES  = 200            # 一個估測通道要有多少誤差通道
+OUTAGE_QUANTILE    = 0.05           # Robust tail quantile：每個 estimated channel 對 S 筆 injection 取 Q0.05
 
 # ================================
 # 訓練 / 驗證 / 測試
@@ -106,7 +104,7 @@ ROB_LEARNING_RATE = 0.001
 # 資料夾結構
 # ================================
 SCENARIO_TAG = f"M{TX_ANT}_N{RIS_UNIT}_K{UAV_COMM}"
-BASE_RUN_DIR = os.path.join("One_timescale",SCENARIO_TAG)
+BASE_RUN_DIR = os.path.join("Two_timescale",SCENARIO_TAG)
 
 DATA_DIR     = os.path.join(BASE_RUN_DIR, "shared_data")    # shared dataset
 PRETRAIN_DIR = os.path.join(BASE_RUN_DIR, "pretrain")       #

@@ -3,249 +3,380 @@ import os
 import math
 import numpy as np
 import torch
-import torch.optim as optim
-import matplotlib.pyplot as plt
-from tqdm import trange
 
 from settings import *
-from one_timescale_NN import CommNet, RadarNet, ThetaNet
+from baseline import beamformers_power_split
+from two_timescale_NN import CommNet, RadarNet, ThetaNet
+
 
 # ================================
 # Helpers
 # ================================
-def beamformers_power_split(W_C, W_R):
-    """
-    這裡輸入要是正規化後的W_C, W_R
-    """
-    total_power = torch.as_tensor(TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
-    """
-    舊版code
-    # 先把 W_C, W_R 都變成 direction,消除 raw power 不均問題
-    W_C_dir = W_C / (torch.sqrt(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12)
-    W_R_dir = W_R / (torch.sqrt(torch.sum(torch.abs(W_R) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12)
-    """
-
-    # 根據sweep來的power分配
-    p_R = total_power * 0.6 
-    p_C = total_power * 0.4
-
-    W_R = torch.sqrt(p_R) * W_R
-    W_C = torch.sqrt(p_C) * W_C
-
-    return W_C, W_R
-
-
 def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
     """
-    CN(0, variance): E|n|^2 = variance
-    Re/Im ~ N(0, variance/2)
+    CN(0,variance):
+        E|n|^2 = variance
+        Re/Im ~ N(0,variance/2)
     """
     sigma = math.sqrt(variance / 2.0)
-    nr = torch.randn(shape, device=device, dtype=torch.float32) * sigma
-    ni = torch.randn(shape, device=device, dtype=torch.float32) * sigma
-    return torch.complex(nr, ni).to(dtype=cdtype)
+    nr = torch.randn(shape,device=device,dtype=torch.float32) * sigma
+    ni = torch.randn(shape,device=device,dtype=torch.float32) * sigma
+    return torch.complex(nr,ni).to(dtype=cdtype)
 
 
-def fmt_vec(x, precision=4):
+def fmt_vec_sci(x, precision=3):
     x = np.asarray(x).reshape(-1)
-    return "{" + " ".join([f"[{float(v):.{precision}f}]" for v in x]) + "}"
+    return "{" + " ".join([f"[{float(v):.{precision}e}]" for v in x]) + "}"
 
 
 # ================================
 # Main
 # ================================
 if __name__ == "__main__":
-    
-    # 簡寫
-    S, B, M, N, K = INJECTION_SAMPLES, N_TEST_CHANNELS, TX_ANT, RIS_UNIT, UAV_COMM
 
-    # 這裡不使用net 只是要用neural_net.py的副函式
-    physics_net = CommNet().to(DEVICE)
-    physics_net.eval()
-    
-    # 讀取資料
-    test_dataset_path  = os.path.join(DATA_DIR, "dataset_test.npz")
+    # ================================
+    # 路徑
+    # ================================
+    test_dataset_path = os.path.join(DATA_DIR,"dataset_test.npz")
+    pretrained_theta_ckpt = os.path.join(PRETRAIN_DIR,"ris_only.ckpt")
 
-    reg_comm_ckpt  = os.path.join(REG_CKPT_DIR, "one_timescale_comm_reg.ckpt")
-    reg_radar_ckpt = os.path.join(REG_CKPT_DIR, "one_timescale_radar_reg.ckpt")
-    reg_theta_ckpt = os.path.join(REG_CKPT_DIR, "one_timescale_theta_reg.ckpt")
+    reg_comm_ckpt = os.path.join(REG_CKPT_DIR,"two_timescale_comm_reg.ckpt")
+    reg_radar_ckpt = os.path.join(REG_CKPT_DIR,"two_timescale_radar_reg.ckpt")
+    rob_comm_ckpt = os.path.join(ROB_CKPT_DIR,"two_timescale_comm_rob.ckpt")
+    rob_radar_ckpt = os.path.join(ROB_CKPT_DIR,"two_timescale_radar_rob.ckpt")
 
-    rob_comm_ckpt  = os.path.join(ROB_CKPT_DIR, "one_timescale_comm_rob.ckpt")
-    rob_radar_ckpt = os.path.join(ROB_CKPT_DIR, "one_timescale_radar_rob.ckpt")
-    rob_theta_ckpt = os.path.join(ROB_CKPT_DIR, "one_timescale_theta_rob.ckpt")
+    for ckpt_path in [pretrained_theta_ckpt,reg_comm_ckpt,reg_radar_ckpt,rob_comm_ckpt,rob_radar_ckpt,]:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"找不到 checkpoint: {ckpt_path}")
 
-    test_dataset       = physics_net.load_channel_dataset(test_dataset_path, "test")
-    result_dir         = RESULT_DIR
-    print("\n[INFO] 載入固定 datasets ...")
-    print(f"[INFO] test_dataset_path = {test_dataset_path}")
+    # ================================
+    # 建立並載入網路
+    # ================================
+    pretrained_theta_net = ThetaNet().to(DEVICE)
 
-    # 載入 REG 權重
-    reg_comm_net  = CommNet().to(DEVICE)
+    reg_comm_net = CommNet().to(DEVICE)
     reg_radar_net = RadarNet().to(DEVICE)
-    reg_theta_net = ThetaNet().to(DEVICE)
 
-    reg_comm_net.load_model(reg_comm_ckpt, verbose=False)
-    reg_radar_net.load_model(reg_radar_ckpt, verbose=False)
-    reg_theta_net.load_model(reg_theta_ckpt, verbose=False)
+    pretrained_theta_net.load_model(pretrained_theta_ckpt,strict=True,verbose=True)
+    reg_comm_net.load_model(reg_comm_ckpt,strict=True,verbose=True)
+    reg_radar_net.load_model(reg_radar_ckpt,strict=True,verbose=True)
 
+    pretrained_theta_net.eval()
     reg_comm_net.eval()
     reg_radar_net.eval()
-    reg_theta_net.eval()
 
-    # 載入 ROB 權重
-    rob_comm_net  = CommNet().to(DEVICE)
+    rob_comm_net = CommNet().to(DEVICE)
     rob_radar_net = RadarNet().to(DEVICE)
-    rob_theta_net = ThetaNet().to(DEVICE)
 
-    rob_comm_net.load_model(rob_comm_ckpt, verbose=False)
-    rob_radar_net.load_model(rob_radar_ckpt, verbose=False)
-    rob_theta_net.load_model(rob_theta_ckpt, verbose=False)
+    rob_comm_net.load_model(rob_comm_ckpt,strict=True,verbose=True)
+    rob_radar_net.load_model(rob_radar_ckpt,strict=True,verbose=True)
 
     rob_comm_net.eval()
     rob_radar_net.eval()
-    rob_theta_net.eval()
+    # ================================
+    # 讀取 test dataset
+    # ================================
+    test_dataset = reg_comm_net.load_channel_dataset(test_dataset_path,"test")
+
+    print("\n[INFO] 載入 test dataset 與 REG checkpoints ...")
+    print(f"[INFO] test_dataset_path      = {test_dataset_path}")
+    print(f"[INFO] pretrained_theta_ckpt  = {pretrained_theta_ckpt}")
+    print(f"[INFO] reg_comm_ckpt          = {reg_comm_ckpt}")
+    print(f"[INFO] reg_radar_ckpt         = {reg_radar_ckpt}")
+    print(f"[INFO] rob_comm_ckpt          = {rob_comm_ckpt}")
+    print(f"[INFO] rob_radar_ckpt         = {rob_radar_ckpt}")
 
     with torch.no_grad():
-        # 載入估測通道
-        h_dk_teat = torch.as_tensor(test_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)   # (B, M, K)
-        h_rk_teat = torch.as_tensor(test_dataset["h_rk_hat"],dtype=torch.complex64,device=DEVICE)   # (B, N, K)
-        G_test    = torch.as_tensor(test_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)      # (B, N, M)
-        g_dt_test = torch.as_tensor(test_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)   # (B, M, 1)
+        # ================================================================
+        # 1. Test estimated channels
+        # ================================================================
+        test_h_dk_hat = torch.as_tensor(test_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)
+        test_h_rk_hat = torch.as_tensor(test_dataset["h_rk_hat"],dtype=torch.complex64,device=DEVICE)
+        test_G_hat = torch.as_tensor(test_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)
+        test_g_dt_hat = torch.as_tensor(test_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)
 
-        # 輸入 REG 網路
-        theta_reg   = reg_theta_net(h_dk_teat,h_rk_teat,G_test,g_dt_test)
-        W_C_reg_raw = reg_comm_net(h_dk_teat,h_rk_teat,G_test,g_dt_test)
-        W_R_reg_raw = reg_radar_net(h_dk_teat,h_rk_teat,G_test,g_dt_test)
+        S = INJECTION_SAMPLES
+        B = test_h_dk_hat.shape[0]
+        M = TX_ANT
+        N = RIS_UNIT
+        K = UAV_COMM
+        R = RADAR_STREAMS
 
-        W_C_reg, W_R_reg = beamformers_power_split(W_C_reg_raw, W_R_reg_raw)            # power split 寫死
+        # ================================================================
+        # 2. 使用 estimated channels 設計 REG theta、W_C、W_R
+        # ================================================================
+        test_theta = pretrained_theta_net(test_h_dk_hat,test_h_rk_hat,test_G_hat,test_g_dt_hat)
 
-        # 輸入 ROB 網路
-        theta_rob   = rob_theta_net(h_dk_teat,h_rk_teat,G_test,g_dt_test)
-        W_C_rob_raw = rob_comm_net(h_dk_teat,h_rk_teat,G_test,g_dt_test)
-        W_R_rob_raw = rob_radar_net(h_dk_teat,h_rk_teat,G_test,g_dt_test)
-
-        W_C_rob, W_R_rob = beamformers_power_split(W_C_rob_raw, W_R_rob_raw)            # power split 寫死
-
-        # 使用 .unsqueeze(0) 新增第0維度 供INJ用
-        # 使用 .expand       功能上"複製"通道成S份 (實際較複雜但最終是複製)
-        h_dk_rep = h_dk_teat.unsqueeze(0).expand(S, B, M, K)
-        h_rk_rep = h_rk_teat.unsqueeze(0).expand(S, B, N, K)
-        G_rep    = G_test.unsqueeze(0).expand(S, B, N, M)
-        g_dt_rep = g_dt_test.unsqueeze(0).expand(S, B, M, 1)
-
-        # 注入不確定：INJECTION_VARIANCE 是相對通道功率
-        # noise power = INJECTION_VARIANCE * mean(|channel|^2)
-
-        h_dk_power = torch.mean(torch.abs(h_dk_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-        h_rk_power = torch.mean(torch.abs(h_rk_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-        G_power    = torch.mean(torch.abs(G_rep)    ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-        g_dt_power = torch.mean(torch.abs(g_dt_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-
-        # 注入不確定
-        h_dk_inj = h_dk_rep + torch.sqrt(INJECTION_VARIANCE * h_dk_power) * complex_awgn(h_dk_rep.shape, 1.0, DEVICE, h_dk_rep.dtype)   # (S,B,M,K)
-        h_rk_inj = h_rk_rep + torch.sqrt(INJECTION_VARIANCE * h_rk_power) * complex_awgn(h_rk_rep.shape, 1.0, DEVICE, h_rk_rep.dtype)   # (S,B,N,K)
-        G_inj    = G_rep    + torch.sqrt(INJECTION_VARIANCE * G_power)    * complex_awgn(G_rep.shape,    1.0, DEVICE, G_rep.dtype)      # (S,B,N,M)
-        g_dt_inj = g_dt_rep + torch.sqrt(INJECTION_VARIANCE * g_dt_power) * complex_awgn(g_dt_rep.shape, 1.0, DEVICE, g_dt_rep.dtype)   # (S,B,M,1)
-
-        # 為了使用(physics_net.)副函式,先將4維壓到3維"注意! 此舉不會破壞5%的抽取"
-        h_dk_flat  = h_dk_inj.reshape(S*B, M, K)
-        h_rk_flat  = h_rk_inj.reshape(S*B, N, K)
-        G_flat     = G_inj.reshape(S*B, N, M)
-        g_dt_flat  = g_dt_inj.reshape(S*B, M, 1)
-
-        # ================================
-        # REG Eval
-        # ================================
-        theta_reg_rep = theta_reg.unsqueeze(0).expand(S, B, N)
-
-        W_C_reg_rep = W_C_reg.unsqueeze(0).expand(S, B, M, K)
-        W_R_reg_rep = W_R_reg.unsqueeze(0).expand(S, B, M, 1)
-
-        theta_reg_flat = theta_reg_rep.reshape(S*B, N)
-        W_C_reg_flat   = W_C_reg_rep.reshape(S*B, M, K)
-        W_R_reg_flat   = W_R_reg_rep.reshape(S*B, M, 1)
-
-        H_eff_H_reg_flat = physics_net.compute_effective_channel(h_dk_flat,h_rk_flat,G_flat,theta_reg_flat)
-
-        reg_metrics_flat = physics_net.compute_isac_batch_performance(H_eff_H_reg_flat,g_dt_flat,W_C_reg_flat,W_R_reg_flat)
-        
-        # 計算結果
-        reg_rate_inj = reg_metrics_flat["rate"].reshape(S, B, K)                # (S,B,K)
-
-        reg_rate_user_q05 = torch.quantile(reg_rate_inj,OUTAGE_QUANTILE,dim=0)  # (B,K)
-
-        reg_sumrate_q05 = torch.sum(reg_rate_user_q05, dim=1)                   # (B,)
-
-        reg_tail_sumrate        = torch.mean(reg_sumrate_q05)                   # scalar
-        reg_rate_user_q05_mean  = torch.mean(reg_rate_user_q05, dim=0)          # (K,)
-
-        reg_target_snr_mean_db = reg_metrics_flat["target_snr_mean_db"]         # scalar
-
-        # ================================
-        # ROB Eval
-        # ================================
-        theta_rob_rep = theta_rob.unsqueeze(0).expand(S, B, N)
-
-        W_C_rob_rep = W_C_rob.unsqueeze(0).expand(S, B, M, K)
-        W_R_rob_rep = W_R_rob.unsqueeze(0).expand(S, B, M, 1)
-
-        theta_rob_flat = theta_rob_rep.reshape(S*B, N)
-        W_C_rob_flat   = W_C_rob_rep.reshape(S*B, M, K)
-        W_R_rob_flat   = W_R_rob_rep.reshape(S*B, M, 1)
-
-        H_eff_H_rob_flat = physics_net.compute_effective_channel(h_dk_flat,h_rk_flat,G_flat,theta_rob_flat)
-
-        rob_metrics_flat = physics_net.compute_isac_batch_performance(H_eff_H_rob_flat,g_dt_flat,W_C_rob_flat,W_R_rob_flat)
-
-        rob_rate_inj = rob_metrics_flat["rate"].reshape(S, B, K)                # (S,B,K)
-
-        rob_rate_user_q05 = torch.quantile(rob_rate_inj,OUTAGE_QUANTILE,dim=0)  # (B,K)
-
-        rob_sumrate_q05 = torch.sum(rob_rate_user_q05, dim=1)                   # (B,)
-
-        rob_tail_sumrate        = torch.mean(rob_sumrate_q05)                   # scalar
-        rob_rate_user_q05_mean  = torch.mean(rob_rate_user_q05, dim=0)          # (K,)
-
-        rob_target_snr_mean_db = rob_metrics_flat["target_snr_mean_db"]         # scalar
-
-        # 輸出 REG 結果
-        print("=" * 90)
-        print("[Injection-tail performance: One-timescale REG Net]")
-        print("=" * 90)
-        print(f"Injection samples S : {S}")
-        print(f"Estimated channels B: {B}")
-        print(f"Tail quantile       : {OUTAGE_QUANTILE:.2f}")
-        print("-" * 90)
-
-        print("[Communication tail metrics]")
-        print(f"Robust sum-rate     : {float(reg_tail_sumrate.detach().cpu()):.6f} bps/Hz")
-        print(
-            f"UE tail rate        : "
-            f"{fmt_vec(reg_rate_user_q05_mean.detach().cpu().numpy(), precision=4)} bps/Hz"
+        reg_H_eff_H_hat = reg_comm_net.compute_effective_channel(
+            test_h_dk_hat,
+            test_h_rk_hat,
+            test_G_hat,
+            test_theta,
         )
 
-        print("-" * 90)
-        print("[Target sensing metrics over injected channels]")
-        print(f"Target SNR mean dB  : {float(reg_target_snr_mean_db.detach().cpu()):.3f} dB")
-        print("=" * 90)
+        reg_W_C_dir = reg_comm_net(reg_H_eff_H_hat)
+        reg_W_R_dir = reg_radar_net(reg_H_eff_H_hat)
 
-        # 輸出 ROB 結果
-        print("=" * 90)
-        print("[Injection-tail performance: One-timescale ROB Net]")
-        print("=" * 90)
-        print(f"Injection samples S : {S}")
-        print(f"Estimated channels B: {B}")
-        print(f"Tail quantile       : {OUTAGE_QUANTILE:.2f}")
-        print("-" * 90)
+        if reg_W_C_dir.shape != (B,M,K):
+            raise ValueError(f"reg_W_C_dir shape error: expected {(B,M,K)}, got {tuple(reg_W_C_dir.shape)}")
 
-        print("[Communication tail metrics]")
-        print(f"Robust sum-rate     : {float(rob_tail_sumrate.detach().cpu()):.6f} bps/Hz")
-        print(
-            f"UE tail rate        : "
-            f"{fmt_vec(rob_rate_user_q05_mean.detach().cpu().numpy(), precision=4)} bps/Hz"
+        if reg_W_R_dir.shape != (B,M,R):
+            raise ValueError(f"reg_W_R_dir shape error: expected {(B,M,R)}, got {tuple(reg_W_R_dir.shape)}")
+
+        reg_W_C,reg_W_R = beamformers_power_split(reg_W_C_dir,reg_W_R_dir)
+
+        # ================================================================
+        # 2.使用相同 pretrained theta 設計 ROB W_C、W_R
+        # ================================================================
+        rob_H_eff_H_hat = rob_comm_net.compute_effective_channel(
+            test_h_dk_hat,
+            test_h_rk_hat,
+            test_G_hat,
+            test_theta,
         )
 
+        rob_W_C_dir = rob_comm_net(rob_H_eff_H_hat)
+        rob_W_R_dir = rob_radar_net(rob_H_eff_H_hat)
+
+        if rob_W_C_dir.shape != (B,M,K):
+            raise ValueError(f"rob_W_C_dir shape error: expected {(B,M,K)}, got {tuple(rob_W_C_dir.shape)}")
+
+        if rob_W_R_dir.shape != (B,M,R):
+            raise ValueError(f"rob_W_R_dir shape error: expected {(B,M,R)}, got {tuple(rob_W_R_dir.shape)}")
+
+        rob_W_C,rob_W_R = beamformers_power_split(rob_W_C_dir,rob_W_R_dir)
+
+        # ================================================================
+        # 3. 一次性建立完整 injection channels，不使用 chunk
+        # ================================================================
+        inj_h_dk_rep = test_h_dk_hat.unsqueeze(0).expand(S,B,M,K)
+        inj_h_rk_rep = test_h_rk_hat.unsqueeze(0).expand(S,B,N,K)
+        inj_G_rep = test_G_hat.unsqueeze(0).expand(S,B,N,M)
+        inj_g_dt_rep = test_g_dt_hat.unsqueeze(0).expand(S,B,M,1)
+
+        # 每筆 estimated channel block 的 empirical mean power
+        inj_h_dk_power = torch.mean(torch.abs(inj_h_dk_rep) ** 2,dim=(2,3),keepdim=True).real
+        inj_h_rk_power = torch.mean(torch.abs(inj_h_rk_rep) ** 2,dim=(2,3),keepdim=True).real
+        inj_G_power = torch.mean(torch.abs(inj_G_rep) ** 2,dim=(2,3),keepdim=True).real
+        inj_g_dt_power = torch.mean(torch.abs(inj_g_dt_rep) ** 2,dim=(2,3),keepdim=True).real
+
+        # X_inj = X_hat + sqrt(INJECTION_VARIANCE * mean|X_hat|^2) * CN(0,1)
+        inj_h_dk = inj_h_dk_rep + torch.sqrt(INJECTION_VARIANCE * inj_h_dk_power) * complex_awgn(inj_h_dk_rep.shape,1.0,DEVICE,inj_h_dk_rep.dtype)
+        inj_h_rk = inj_h_rk_rep + torch.sqrt(INJECTION_VARIANCE * inj_h_rk_power) * complex_awgn(inj_h_rk_rep.shape,1.0,DEVICE,inj_h_rk_rep.dtype)
+        inj_G = inj_G_rep + torch.sqrt(INJECTION_VARIANCE * inj_G_power) * complex_awgn(inj_G_rep.shape,1.0,DEVICE,inj_G_rep.dtype)
+        inj_g_dt = inj_g_dt_rep + torch.sqrt(INJECTION_VARIANCE * inj_g_dt_power) * complex_awgn(inj_g_dt_rep.shape,1.0,DEVICE,inj_g_dt_rep.dtype)
+
+        # ================================================================
+        # 4. 對同一 estimated channel 的 S 筆 injection
+        #    固定使用相同 theta、REG W_C、REG W_R
+        # ================================================================
+        test_theta_rep = test_theta.unsqueeze(0).expand(S,B,N)
+        reg_W_C_rep = reg_W_C.unsqueeze(0).expand(S,B,M,K)
+        reg_W_R_rep = reg_W_R.unsqueeze(0).expand(S,B,M,R)
+
+        # 壓平 S、B 維度，供共用 physics functions 使用
+        inj_h_dk_flat = inj_h_dk.reshape(S*B,M,K)
+        inj_h_rk_flat = inj_h_rk.reshape(S*B,N,K)
+        inj_G_flat = inj_G.reshape(S*B,N,M)
+        inj_g_dt_flat = inj_g_dt.reshape(S*B,M,1)
+
+        test_theta_flat = test_theta_rep.reshape(S*B,N)
+        reg_W_C_flat = reg_W_C_rep.reshape(S*B,M,K)
+        reg_W_R_flat = reg_W_R_rep.reshape(S*B,M,R)
+
+        # 使用 injected channels 重新組成 effective channel
+        reg_H_eff_H_inj_flat = reg_comm_net.compute_effective_channel(
+            inj_h_dk_flat,
+            inj_h_rk_flat,
+            inj_G_flat,
+            test_theta_flat,
+        )
+
+        reg_metrics_flat = reg_comm_net.compute_isac_batch_performance(
+            reg_H_eff_H_inj_flat,
+            inj_g_dt_flat,
+            reg_W_C_flat,
+            reg_W_R_flat,
+        )
+
+        # ================================================================
+        # 5. 還原 shape
+        # ================================================================
+        reg_allUE_rate = reg_metrics_flat["rate"].reshape(S,B,K)
+        reg_target_snr = reg_metrics_flat["target_snr"].reshape(S,B)
+
+        reg_signal = reg_metrics_flat["signal"].reshape(S,B,K)
+        reg_comm_interf = reg_metrics_flat["comm_interf"].reshape(S,B,K)
+        reg_radar_interf = reg_metrics_flat["radar_interf"].reshape(S,B,K)
+        reg_noise = reg_metrics_flat["noise"]
+
+        # ================================================================
+        # 6. Canonical robust metric
+        #
+        # min over K
+        # -> Q0.05 over S
+        # -> mean over B
+        # ================================================================
+        reg_worstUE_rate = torch.min(reg_allUE_rate,dim=2).values             # (S,B)
+
+        reg_robust_per_channel = torch.quantile(
+            reg_worstUE_rate,
+            OUTAGE_QUANTILE,
+            dim=0,
+        )                                                                      # (B,)
+
+        reg_robust = torch.mean(reg_robust_per_channel)                        # scalar
+
+        # 每個 UE 的 Q0.05 僅作診斷，不作為 objective
+        reg_user_rate_q05 = torch.quantile(reg_allUE_rate,OUTAGE_QUANTILE,dim=0)
+        reg_user_rate_q05_mean = torch.mean(reg_user_rate_q05,dim=0)
+
+        # Target SNR：先對所有 S、B 做 linear mean，再轉 dB
+        reg_target_snr_mean = torch.mean(reg_target_snr)
+        reg_target_snr_mean_db = 10.0 * torch.log10(reg_target_snr_mean.clamp_min(1e-12))
+
+        # REG sensing violation：逐筆檢查全部 S*B 筆 injected target SNR
+        reg_sensing_violation_mask = reg_target_snr < SENSING_SNR_THRESHOLD       # (S,B), bool
+        reg_sensing_violation_count = torch.sum(reg_sensing_violation_mask)       # scalar
+        reg_sensing_total_count = reg_target_snr.numel()                          # S*B
+        reg_sensing_violation_rate = reg_sensing_violation_count.float() / reg_sensing_total_count
+        reg_sensing_violation_percent = 100.0 * reg_sensing_violation_rate
+
+        # SINR components：對所有 injected channels 平均
+        reg_signal_mean = torch.mean(reg_signal,dim=(0,1))
+        reg_comm_interf_mean = torch.mean(reg_comm_interf,dim=(0,1))
+        reg_radar_interf_mean = torch.mean(reg_radar_interf,dim=(0,1))
+
+        # ================================================================
+        # ROB robust evaluation
+        #
+        # 與 REG 共用完全相同的：
+        #     inj_h_dk_flat
+        #     inj_h_rk_flat
+        #     inj_G_flat
+        #     inj_g_dt_flat
+        #     test_theta_flat
+        #
+        # 不重新產生 injection errors。
+        # ================================================================
+        rob_W_C_rep = rob_W_C.unsqueeze(0).expand(S,B,M,K)
+        rob_W_R_rep = rob_W_R.unsqueeze(0).expand(S,B,M,R)
+
+        rob_W_C_flat = rob_W_C_rep.reshape(S*B,M,K)
+        rob_W_R_flat = rob_W_R_rep.reshape(S*B,M,R)
+
+        # 使用相同 injected channels 與相同 pretrained theta
+        rob_H_eff_H_inj_flat = rob_comm_net.compute_effective_channel(
+            inj_h_dk_flat,
+            inj_h_rk_flat,
+            inj_G_flat,
+            test_theta_flat,
+        )
+
+        rob_metrics_flat = rob_comm_net.compute_isac_batch_performance(
+            rob_H_eff_H_inj_flat,
+            inj_g_dt_flat,
+            rob_W_C_flat,
+            rob_W_R_flat,
+        )
+
+        # ================================================================
+        # 還原 ROB tensors
+        # ================================================================
+        rob_allUE_rate = rob_metrics_flat["rate"].reshape(S,B,K)
+        rob_target_snr = rob_metrics_flat["target_snr"].reshape(S,B)
+
+        rob_signal = rob_metrics_flat["signal"].reshape(S,B,K)
+        rob_comm_interf = rob_metrics_flat["comm_interf"].reshape(S,B,K)
+        rob_radar_interf = rob_metrics_flat["radar_interf"].reshape(S,B,K)
+        rob_noise = rob_metrics_flat["noise"]
+
+        # ================================================================
+        # Canonical ROB robust metric
+        #
+        # min over K
+        # -> Q0.05 over S
+        # -> mean over B
+        # ================================================================
+        rob_worstUE_rate = torch.min(rob_allUE_rate,dim=2).values                  # (S,B)
+
+        rob_robust_per_channel = torch.quantile(
+            rob_worstUE_rate,
+            OUTAGE_QUANTILE,
+            dim=0,
+        )                                                                          # (B,)
+
+        rob_robust = torch.mean(rob_robust_per_channel)                            # scalar
+
+        # 每個 UE 的 Q0.05，僅作診斷
+        rob_user_rate_q05 = torch.quantile(
+            rob_allUE_rate,
+            OUTAGE_QUANTILE,
+            dim=0,
+        )                                                                          # (B,K)
+
+        rob_user_rate_q05_mean = torch.mean(
+            rob_user_rate_q05,
+            dim=0,
+        )                                                                          # (K,)
+
+        # Target SNR：先對所有 S、B 做 linear mean，再轉 dB
+        rob_target_snr_mean = torch.mean(rob_target_snr)
+        rob_target_snr_mean_db = 10.0 * torch.log10(
+            rob_target_snr_mean.clamp_min(1e-12)
+        )
+
+        # ROB sensing violation：逐筆檢查全部 S*B 筆 injected target SNR
+        rob_sensing_violation_mask = rob_target_snr < SENSING_SNR_THRESHOLD       # (S,B), bool
+        rob_sensing_violation_count = torch.sum(rob_sensing_violation_mask)       # scalar
+        rob_sensing_total_count = rob_target_snr.numel()                          # S*B
+        rob_sensing_violation_rate = rob_sensing_violation_count.float() / rob_sensing_total_count
+        rob_sensing_violation_percent = 100.0 * rob_sensing_violation_rate
+
+        # SINR components：對所有 injected channels 平均
+        rob_signal_mean = torch.mean(rob_signal,dim=(0,1))
+        rob_comm_interf_mean = torch.mean(rob_comm_interf,dim=(0,1))
+        rob_radar_interf_mean = torch.mean(rob_radar_interf,dim=(0,1))
+
+        # ================================================================
+        # 7. Print REG robust result
+        # ================================================================
+        print("\n" + "=" * 90)
+        print("[REG ROBUST TEST EVALUATION]")
+        print("=" * 90)
+        print(f"Test estimated channels B             : {B}")
+        print(f"Injection samples S                    : {S}")
+        print(f"Injection variance                     : {INJECTION_VARIANCE}")
+        print(f"Tail quantile                          : {OUTAGE_QUANTILE:.2f}")
         print("-" * 90)
-        print("[Target sensing metrics over injected channels]")
-        print(f"Target SNR mean dB  : {float(rob_target_snr_mean_db.detach().cpu()):.3f} dB")
+        print(f"REG robust minimum-user rate Q{OUTAGE_QUANTILE:.2f} : {float(reg_robust.detach().cpu()):.6f} bps/Hz")
+        print(f"REG per-UE rate Q{OUTAGE_QUANTILE:.2f} mean          : {fmt_vec_sci(reg_user_rate_q05_mean.detach().cpu().numpy(),precision=4)} bps/Hz")
+        print(f"REG robust target SNR mean             : {float(reg_target_snr_mean_db.detach().cpu()):.3f} dB")
+        print(f"REG sensing SNR threshold              : {SENSING_SNR_THRESHOLD_DB:.3f} dB")
+        print(f"REG sensing violation count            : {int(reg_sensing_violation_count.detach().cpu().item())} / {reg_sensing_total_count}")
+        print(f"REG sensing violation percentage       : {float(reg_sensing_violation_percent.detach().cpu()):.4f}%")
+        print(f"REG robust signal power                : {fmt_vec_sci(reg_signal_mean.detach().cpu().numpy(),precision=3)}")
+        print(f"REG robust communication interference  : {fmt_vec_sci(reg_comm_interf_mean.detach().cpu().numpy(),precision=3)}")
+        print(f"REG robust radar interference          : {fmt_vec_sci(reg_radar_interf_mean.detach().cpu().numpy(),precision=3)}")
+        print(f"REG robust noise power                 : {float(reg_noise.detach().cpu()):.3e}")
+        print("=" * 90)
+
+        print("\n" + "=" * 90)
+        print("[ROB ROBUST TEST EVALUATION]")
+        print("=" * 90)
+        print(f"Test estimated channels B             : {B}")
+        print(f"Injection samples S                    : {S}")
+        print(f"Injection variance                     : {INJECTION_VARIANCE}")
+        print(f"Tail quantile                          : {OUTAGE_QUANTILE:.2f}")
+        print("-" * 90)
+        print(f"ROB robust minimum-user rate Q{OUTAGE_QUANTILE:.2f} : {float(rob_robust.detach().cpu()):.6f} bps/Hz")
+        print(f"ROB per-UE rate Q{OUTAGE_QUANTILE:.2f} mean          : {fmt_vec_sci(rob_user_rate_q05_mean.detach().cpu().numpy(),precision=4)} bps/Hz")
+        print(f"ROB robust target SNR mean             : {float(rob_target_snr_mean_db.detach().cpu()):.3f} dB")
+        print(f"ROB sensing SNR threshold              : {SENSING_SNR_THRESHOLD_DB:.3f} dB")
+        print(f"ROB sensing violation count            : {int(rob_sensing_violation_count.detach().cpu().item())} / {rob_sensing_total_count}")
+        print(f"ROB sensing violation percentage       : {float(rob_sensing_violation_percent.detach().cpu()):.4f}%")
+        print(f"ROB robust signal power                : {fmt_vec_sci(rob_signal_mean.detach().cpu().numpy(),precision=3)}")
+        print(f"ROB robust communication interference  : {fmt_vec_sci(rob_comm_interf_mean.detach().cpu().numpy(),precision=3)}")
+        print(f"ROB robust radar interference          : {fmt_vec_sci(rob_radar_interf_mean.detach().cpu().numpy(),precision=3)}")
+        print(f"ROB robust noise power                 : {float(rob_noise.detach().cpu()):.3e}")
         print("=" * 90)

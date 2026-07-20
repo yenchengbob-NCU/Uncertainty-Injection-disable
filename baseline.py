@@ -4,9 +4,9 @@ import math
 import numpy as np
 import torch
 from settings import *
-from one_timescale_NN import CommNet
+from two_timescale_NN import CommNet
 
-Debug = False                        # 終端印出檢查
+Debug = True                        # 終端印出檢查
 
 RZF_LAMBDA = 1e-9                    # 設定為 0 就是ZF
 # ============================================================
@@ -36,12 +36,12 @@ def make_random_ris(B):
 
 def make_rzf_beamformer(H_eff_H, lambda_reg):
     """
-    Cell-Free ISAC Eq. (18): RZF communication beamformer.
+    RZF communication beamformer.
 
     Math:
         H_eff = (H_eff_H)^H
         W_C_raw = (H_eff H_eff^H + lambda I_M)^(-1) H_eff
-        w_C,k = w_C,k_raw / ||w_C,k_raw||
+        W_C_dir = W_C_raw / ||W_C_raw||_F
 
     Input:
         H_eff_H : (B,K,M)
@@ -49,11 +49,13 @@ def make_rzf_beamformer(H_eff_H, lambda_reg):
             Each row is h_eff,k^H.
 
         lambda_reg:
-            RZF regularization parameter lambda.
+            RZF regularization parameter.
 
     Return:
         W_C_dir : (B,M,K)
-            Each user beam is individually normalized to unit norm.
+            The complete communication beamforming matrix is
+            Frobenius-normalized to unit power for every batch sample:
+            ||W_C_dir[b]||_F^2 = 1.
             Communication power is assigned later.
     """
 
@@ -80,7 +82,7 @@ def make_rzf_beamformer(H_eff_H, lambda_reg):
     # W_C_raw = (H_eff H_eff^H + lambda I_M)^(-1) H_eff
     W_C_raw = torch.matmul(RZF_matrix_inv,H_eff)                                      # (B,M,K)
 
-    W_C_dir = W_C_raw / (torch.sqrt(torch.sum(torch.abs(W_C_raw) ** 2, dim=(1, 2), keepdim=True).real)+ 1e-12) # 功率正規化
+    W_C_dir = W_C_raw / (torch.sqrt(torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2),keepdim=True).real)+1e-12) # 功率正規化
 
     return W_C_dir
 
@@ -187,19 +189,20 @@ if __name__ == "__main__":
     G    = torch.as_tensor(dataset["G_hat"],dtype=torch.complex64,device=DEVICE)        # (B, N, M)
     g_dt = torch.as_tensor(dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)     # (B, M, 1)
 
-    theta   = make_random_ris(1)                                    # 針對這 layout 建立 1 組 random RIS (B, N)
+    B       =  h_dk.shape[0]
+    theta   = make_random_ris(B) # 每個 estimated channel 各產生一組獨立 random RIS，shape=(B,N)
 
     H_eff_H = physics_net.compute_effective_channel(h_dk,h_rk,G,theta) 
 
-    W_C_raw = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_raw
+    W_C_dir = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_raw
 
-    W_R_raw = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt)               # 這裡輸出功率正規化 W_R_raw
+    W_R_dir = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt)               # 這裡輸出功率正規化 W_R_raw
 
-    W_C, W_R = beamformers_power_split(W_C_raw, W_R_raw)            # power split 寫死
+    W_C, W_R = beamformers_power_split(W_C_dir, W_R_dir)            # power split 寫死
 
 
-    W_C_raw_power = torch.mean(torch.sum(torch.abs(W_C_raw) ** 2, dim=(1, 2)))
-    W_R_raw_power = torch.mean(torch.sum(torch.abs(W_R_raw) ** 2, dim=(1, 2)))
+    W_C_dir_power = torch.mean(torch.sum(torch.abs(W_C_dir) ** 2, dim=(1, 2)))
+    W_R_dir_power = torch.mean(torch.sum(torch.abs(W_R_dir) ** 2, dim=(1, 2)))
     W_C_power     = torch.mean(torch.sum(torch.abs(W_C) ** 2, dim=(1, 2)))
     W_R_power     = torch.mean(torch.sum(torch.abs(W_R) ** 2, dim=(1, 2)))
     W_total_power = W_C_power + W_R_power
@@ -207,8 +210,8 @@ if __name__ == "__main__":
     if Debug:
         print(
             f"[Before power allocation] \n"
-            f"W_C_raw_power = {float(W_C_raw_power.detach().cpu()):.6e}, \n"
-            f"W_R_raw_power = {float(W_R_raw_power.detach().cpu()):.6e}, \n\n"
+            f"W_C_raw_power = {float(W_C_dir_power.detach().cpu()):.6e}, \n"
+            f"W_R_raw_power = {float(W_R_dir_power.detach().cpu()):.6e}, \n\n"
             f"[After power allocation] \n"
             f"W_C power = {float(W_C_power.detach().cpu()):.6e}, \n"
             f"W_R power = {float(W_R_power.detach().cpu()):.6e}, \n"

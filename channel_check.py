@@ -3,7 +3,7 @@ import math
 import torch
 import numpy as np
 from settings import *
-from one_timescale_NN import CommNet
+from two_timescale_NN import CommNet
 
 # ============================================================
 # Helpers

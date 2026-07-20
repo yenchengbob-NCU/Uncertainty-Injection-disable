@@ -7,24 +7,12 @@ import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
-from baseline import make_rzf_beamformer, mrt_in_H_eff_H_nullspace, RZF_LAMBDA
-from one_timescale_NN import ThetaNet
+from baseline import make_rzf_beamformer, mrt_in_H_eff_H_nullspace, beamformers_power_split, RZF_LAMBDA
+from two_timescale_NN import ThetaNet
 
 # ================================
 # Helpers
 # ================================
-def fmt_vec(x, precision=4):
-    x = np.asarray(x).reshape(-1)
-    return "{" + " ".join([f"[{float(v):.{precision}f}]" for v in x]) + "}"
-
-
-def fmt_vec_sci(x, precision=4):
-    x = np.asarray(x).reshape(-1)
-    return "{" + " ".join(
-        [f"[{float(v):.{precision}e}]" for v in x]
-    ) + "}"
-
-
 def moving_average(x, window):
     """
     Valid moving average.
@@ -45,30 +33,14 @@ def moving_average(x, window):
     return ma_epochs, y_ma
 
 
-def beamformers_power_split(W_C, W_R):
-    """
-    這裡輸入要是正規化後的W_C, W_R
-    """
-    total_power = torch.as_tensor(TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
-
-    # 根據sweep來的power分配
-    p_R = total_power * 0.6 
-    p_C = total_power * 0.4
-
-    W_R = torch.sqrt(p_R) * W_R
-    W_C = torch.sqrt(p_C) * W_C
-
-    return W_C, W_R
-
-
-def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
+def plot_theta_pretrain_curves(curve_path, curve_dir, ma_window=20):
     """
     畫兩類圖：
     1. Train / Validation Loss
     2. Train / Validation Nominal worst-UE rate
     """
-    data = np.load(reg_curve_path)
-    out_dir = reg_curve_dir
+    data = np.load(curve_path)
+    out_dir = curve_dir
 
     os.makedirs(out_dir, exist_ok=True)
 
@@ -124,7 +96,7 @@ def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
 
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.title("Fig. 1: One-timescale REG Loss")
+    plt.title("Fig. 1: ThetaNet Pretraining Loss")
     plt.grid(True, alpha=0.35)
     plt.legend()
     plt.tight_layout()
@@ -176,7 +148,7 @@ def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
 
     plt.xlabel("Epoch")
     plt.ylabel("Nominal Worst-UE Rate (bps/Hz)")
-    plt.title("Fig. 2: One-timescale REG Nominal Worst-UE Rate")
+    plt.title("Fig. 2: ThetaNet Nominal Worst-UE Rate")
     plt.grid(True, alpha=0.35)
     plt.legend()
     plt.tight_layout()
@@ -192,17 +164,15 @@ def plot_RISNET_only_curves(reg_curve_path, reg_curve_dir, ma_window=20):
 # Main
 # ================================
 if __name__ == "__main__":
-
     # 這裡不使用net 只是要用neural_net.py的副函式
-    physics_net = ThetaNet().to(DEVICE)
-    physics_net.eval()
+    theta_net = ThetaNet().to(DEVICE)
 
     # 讀取資料
     train_dataset_path  = os.path.join(DATA_DIR, "dataset_train.npz")
     val_dataset_path    = os.path.join(DATA_DIR, "dataset_val.npz")
 
-    train_dataset = physics_net.load_channel_dataset(train_dataset_path, "train")
-    val_dataset   = physics_net.load_channel_dataset(val_dataset_path, "val")
+    train_dataset = theta_net.load_channel_dataset(train_dataset_path, "train")
+    val_dataset   = theta_net.load_channel_dataset(val_dataset_path, "val")
     
     print("\n[INFO] 載入固定 datasets ...")
     print(f"[INFO] train_dataset_path = {train_dataset_path}")
@@ -211,8 +181,6 @@ if __name__ == "__main__":
     # ================================
     # Train RIS net only
     # ================================
-    theta_net = ThetaNet().to(DEVICE)
-
     optimizer = optim.Adam(list(theta_net.parameters()),lr=REG_LEARNING_RATE)
 
     pre_theta_ckpt = os.path.join(PRETRAIN_DIR, "ris_only.ckpt")
@@ -238,7 +206,7 @@ if __name__ == "__main__":
 
     # 訓練參數
     best_val_loss = float("inf")   # L_best <- infinity
-    best_val_worstUE_rate = 0.0    # best loss 對應的 validation sumrate
+    best_val_worstUE_rate = 0.0    # best validation loss 對應的 nominal worst-UE rate
     best_valtarget_snr_db = 0.0
     best_val_epoch = 0             # best loss 出現在哪個 epoch
 
@@ -251,7 +219,7 @@ if __name__ == "__main__":
     val_channels   = val_dataset["h_dk_hat"].shape[0]
 
     # 開始訓練
-    for epoch in trange(REG_EPOCHS, desc="REG Training"):
+    for epoch in trange(REG_EPOCHS,desc="ThetaNet Pretraining"):
         
         theta_net.train()
         # 一個batch 產生一個 loss 更新一次網路
@@ -274,15 +242,14 @@ if __name__ == "__main__":
 
             theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
 
-            H_eff_H = physics_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
+            H_eff_H = theta_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
 
-            W_C_raw = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_raw
+            W_C_dir = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_dir
 
-            W_R_raw = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt_hat)           # 這裡輸出功率正規化 W_R_raw
+            W_R_dir = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt_hat)           # 這裡輸出功率正規化 W_R_dir
 
-            W_C,W_R = beamformers_power_split(W_C_raw,W_R_raw)      # power 分配
+            W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)      # power 分配
 
-            
             metrics = theta_net.compute_isac_batch_performance(H_eff_H,g_dt_hat,W_C,W_R)
             """ 輸出結果 :
                     SINR power components:
@@ -323,7 +290,6 @@ if __name__ == "__main__":
             sensing_violation = torch.relu(SENSING_SNR_THRESHOLD - nominal_target_snr)  # (B,)
             sensing_penalty = torch.mean(sensing_violation)   
 
-
             # loss function
             loss = -(nominal) + REG_SENSING_LOSS_WEIGHT  * sensing_penalty
 
@@ -361,10 +327,10 @@ if __name__ == "__main__":
 
             H_eff_val   = theta_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
 
-            W_C_val_raw = make_rzf_beamformer(H_eff_val,RZF_LAMBDA)
-            W_R_val_raw = mrt_in_H_eff_H_nullspace(H_eff_val, g_dt_val)
+            W_C_val_dir = make_rzf_beamformer(H_eff_val,RZF_LAMBDA)
+            W_R_val_dir = mrt_in_H_eff_H_nullspace(H_eff_val,g_dt_val)
 
-            W_C_val, W_R_val = beamformers_power_split(W_C_val_raw,W_R_val_raw)
+            W_C_val, W_R_val = beamformers_power_split(W_C_val_dir,W_R_val_dir)
 
             
             val_metrics = theta_net.compute_isac_batch_performance(H_eff_val,g_dt_val,W_C_val,W_R_val)
@@ -474,20 +440,17 @@ if __name__ == "__main__":
             f"Valpenalty={val_logs['sensing_penalty']:.3f} | "
         )
 
-    plot_RISNET_only_curves(pre_curve_path,pre_curve_dir)
+    plot_theta_pretrain_curves(pre_curve_path,pre_curve_dir)
 
 
 
-    print("\n[INFO] One-timescale REG training finished.")
-    print(f"Sensing SNR threshold             = {SENSING_SNR_THRESHOLD_DB} dB")
-    print(f"Sensing penalty weight            = {REG_SENSING_LOSS_WEIGHT}")
-
-    print(f"[INFO] Best validation epoch      = {best_val_epoch}")
-    print(f"[INFO] Best validation loss       = {best_val_loss:.6f}")
-    print(f"[INFO] Nominal worst-UE rate      = {best_val_worstUE_rate:.6f}")
-    print(f"[INFO] Nominal target snr db      = {best_valtarget_snr_db:.3f} dB")         
-    print("[INFO] Short-term regular training finished.")
-
+    print("\n[INFO] ThetaNet nominal pretraining finished.")
+    print(f"[INFO] Sensing SNR threshold     = {SENSING_SNR_THRESHOLD_DB} dB")
+    print(f"[INFO] Sensing penalty weight    = {REG_SENSING_LOSS_WEIGHT}")
+    print(f"[INFO] Best validation epoch     = {best_val_epoch}")
+    print(f"[INFO] Best validation loss      = {best_val_loss:.6f}")
+    print(f"[INFO] Nominal worst-UE rate     = {best_val_worstUE_rate:.6f}")
+    print(f"[INFO] Nominal target SNR        = {best_valtarget_snr_db:.3f} dB")
 
 
 
