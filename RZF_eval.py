@@ -28,8 +28,8 @@ def beamformers_power_split(W_C, W_R):
     total_power = torch.as_tensor(TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
 
     # 根據sweep來的power分配
-    p_R = total_power * 0.7
-    p_C = total_power * 0.3
+    p_R = total_power * 0.6
+    p_C = total_power * 0.4
 
     W_R = torch.sqrt(p_R) * W_R
     W_C = torch.sqrt(p_C) * W_C

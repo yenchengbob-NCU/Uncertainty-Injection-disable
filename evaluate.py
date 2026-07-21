@@ -114,8 +114,8 @@ if __name__ == "__main__":
             test_theta,
         )
 
-        reg_W_C_dir = reg_comm_net(reg_H_eff_H_hat)
-        reg_W_R_dir = reg_radar_net(reg_H_eff_H_hat)
+        reg_W_C_dir = reg_comm_net(reg_H_eff_H_hat ,test_g_dt_hat)
+        reg_W_R_dir = reg_radar_net(reg_H_eff_H_hat ,test_g_dt_hat)
 
         if reg_W_C_dir.shape != (B,M,K):
             raise ValueError(f"reg_W_C_dir shape error: expected {(B,M,K)}, got {tuple(reg_W_C_dir.shape)}")
@@ -135,8 +135,8 @@ if __name__ == "__main__":
             test_theta,
         )
 
-        rob_W_C_dir = rob_comm_net(rob_H_eff_H_hat)
-        rob_W_R_dir = rob_radar_net(rob_H_eff_H_hat)
+        rob_W_C_dir = rob_comm_net(rob_H_eff_H_hat ,test_g_dt_hat)
+        rob_W_R_dir = rob_radar_net(rob_H_eff_H_hat ,test_g_dt_hat)
 
         if rob_W_C_dir.shape != (B,M,K):
             raise ValueError(f"rob_W_C_dir shape error: expected {(B,M,K)}, got {tuple(rob_W_C_dir.shape)}")

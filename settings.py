@@ -69,8 +69,8 @@ SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 10.0     # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT  = 0.5     # rob 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 0.0     # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT  = 0.0     # rob 感測懲罰權重
 
 # ================================
 # dataset 生成
@@ -83,9 +83,10 @@ N_TEST_CHANNELS  = 2000
 # Robust / uncertainty injection
 # ================================
 
-INJECTION_VARIANCE = 0.075          # Error power = 7.5% of each estimated channel block's empirical mean power
-INJECTION_SAMPLES  = 200            # 一個估測通道要有多少誤差通道
-OUTAGE_QUANTILE    = 0.05           # Robust tail quantile：每個 estimated channel 對 S 筆 injection 取 Q0.05
+INJECTION_VARIANCE  = 0.075          # Error power = 7.5% of each estimated channel block's empirical mean power
+INJECTION_SAMPLES   = 200            # 一個估測通道要有多少誤差通道
+OUTAGE_QUANTILE     = 0.05           # Robust tail quantile：每個 estimated channel 對 S 筆 injection 取 Q0.05
+TAR_OUTAGE_QUANTILE = 0.10
 
 # ================================
 # 訓練 / 驗證 / 測試
@@ -106,12 +107,16 @@ ROB_LEARNING_RATE = 0.001
 SCENARIO_TAG = f"M{TX_ANT}_N{RIS_UNIT}_K{UAV_COMM}"
 BASE_RUN_DIR = os.path.join("Two_timescale",SCENARIO_TAG)
 
-DATA_DIR     = os.path.join(BASE_RUN_DIR, "shared_data")    # shared dataset
-PRETRAIN_DIR = os.path.join(BASE_RUN_DIR, "pretrain")       #
-REG_CKPT_DIR = os.path.join(BASE_RUN_DIR, "reg")
-ROB_CKPT_DIR = os.path.join(BASE_RUN_DIR, "rob")
-RESULT_DIR   = os.path.join(BASE_RUN_DIR, "results")
+REG_PENALTY_TAG = f"reg_{REG_SENSING_LOSS_WEIGHT:g}"
+ROB_PENALTY_TAG = f"rob_{ROB_SENSING_LOSS_WEIGHT:g}"
 
+DATA_DIR        = os.path.join(BASE_RUN_DIR, "shared_data")         # shared dataset
+PRETRAIN_DIR    = os.path.join(BASE_RUN_DIR, "pretrain")            #
+
+REG_CKPT_DIR    = os.path.join(BASE_RUN_DIR, "regular",REG_PENALTY_TAG)
+ROB_CKPT_DIR    = os.path.join(BASE_RUN_DIR, "robust" ,ROB_PENALTY_TAG)
+
+RESULT_DIR      = os.path.join(BASE_RUN_DIR, "results")
 
 # ================================
 # 建立共用資料夾

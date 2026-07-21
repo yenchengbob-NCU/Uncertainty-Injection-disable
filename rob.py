@@ -407,8 +407,8 @@ if __name__ == "__main__":
                 H_eff_H = comm_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
 
             # 算出W_C,W_R
-            W_C_dir   = comm_net(H_eff_H)  # 正規化
-            W_R_dir   = radar_net(H_eff_H) # 正規化
+            W_C_dir = comm_net(H_eff_H,g_dt_hat)  # 正規化
+            W_R_dir = radar_net(H_eff_H,g_dt_hat) # 正規化
 
             W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)      # power 分配
 
@@ -558,8 +558,8 @@ if __name__ == "__main__":
             val_H_eff_H = comm_net.compute_effective_channel(val_h_dk,val_h_rk,val_G,val_theta)
 
             # 由本 epoch 的 CommNet 與 RadarNet 產生 unit-power beam directions
-            val_W_C_dir = comm_net(val_H_eff_H)
-            val_W_R_dir = radar_net(val_H_eff_H)
+            val_W_C_dir = comm_net(val_H_eff_H,val_g_dt)
+            val_W_R_dir = radar_net(val_H_eff_H,val_g_dt)
 
             # 固定分配 0.4P communication power 與 0.6P sensing power
             val_W_C,val_W_R = beamformers_power_split(val_W_C_dir,val_W_R_dir)

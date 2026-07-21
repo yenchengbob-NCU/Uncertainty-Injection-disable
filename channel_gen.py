@@ -141,6 +141,8 @@ def print_dataset_debug(data):
         f"power={channel_power(data['g_dt_hat']):.4e}, "
         f"power_dB={float(to_db(channel_power(data['g_dt_hat']))):.2f} dB"
     )
+
+
 # ================================
 # 幾何相關量：由指定 layout 計算
 # ================================

@@ -420,8 +420,8 @@ if __name__ == "__main__":
                 H_eff_H = comm_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
             
             # 算出W_C,W_R
-            W_C_dir   = comm_net(H_eff_H)  # 正規化
-            W_R_dir   = radar_net(H_eff_H) # 正規化
+            W_C_dir = comm_net(H_eff_H,g_dt_hat)  # 正規化
+            W_R_dir = radar_net(H_eff_H,g_dt_hat) # 正規化
 
             W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)      # power 分配
 
@@ -525,8 +525,8 @@ if __name__ == "__main__":
             H_eff_val   = comm_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
 
             # 輸入本次epoch網路來 validate
-            W_C_val_dir = comm_net(H_eff_val)    
-            W_R_val_dir = radar_net(H_eff_val)
+            W_C_val_dir = comm_net(H_eff_val,g_dt_val)  
+            W_R_val_dir = radar_net(H_eff_val,g_dt_val)
 
             W_C_val, W_R_val = beamformers_power_split(W_C_val_dir,W_R_val_dir)     # power 分配
 

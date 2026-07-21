@@ -257,7 +257,8 @@ class CommNet(ISACNetBase):
     """
     communication beamformer network.
     Input:
-        H_eff_H : (B,K,M), complex
+        H_eff_H     : (B, K, M), complex
+        g_dt_hat_pl : (B, M, 1), complex
         -> input,       shape = (B, input_dim), real
     Output:
         output,         shape = (B, 2*M*K) real
@@ -267,7 +268,7 @@ class CommNet(ISACNetBase):
     def __init__(self, hidden_dim: int = NET, ckpt_kind: str = "shortterm_comm"):
             super().__init__(ckpt_kind)
 
-            self.in_dim = 2 * UAV_COMM * TX_ANT        # 2*K*M = 16 
+            self.in_dim = 2 * (UAV_COMM * TX_ANT + TX_ANT)   # H_eff_H + g_dt_hat 2*(2*4+4)
             self.hidden_dim = hidden_dim
             self.out_complex_dim = TX_ANT * UAV_COMM   # M*K = 8 complex entries
 
@@ -294,27 +295,31 @@ class CommNet(ISACNetBase):
 
         return y
 
-    def encode_channels(self, H_eff_H):
+    def encode_channels(self, H_eff_H, g_dt_hat):
         """
         將含有 PL 的估測通道 轉成 NN real input
 
         H_eff_H : (B,K,M), complex
+        g_dt_hat: (B,M,1), complex
 
         return:
-            x : (B,2*K*M), real
+            x : (B,2*(K*M+M)), real
         """
 
         H_eff_H = torch.as_tensor(H_eff_H,dtype=torch.complex64,device=self.model_device)
+        g_dt_hat = torch.as_tensor(g_dt_hat,dtype=torch.complex64,device=self.model_device)
 
         B = H_eff_H.shape[0]
         # 固定尺度縮放，不改變不同 channel 間的相對大小
-        H_eff_H_scaled = 1.0e4 * H_eff_H
-        H_eff_H_flat = H_eff_H_scaled.reshape(B,-1)
+        H_eff_H_flat  = (1.0e4 * H_eff_H).reshape(B,-1)
+        g_dt_hat_flat = (1.0e3 * g_dt_hat).reshape(B,-1)
 
         x = torch.cat(
             [
                 H_eff_H_flat.real,
                 H_eff_H_flat.imag,
+                g_dt_hat_flat.real,
+                g_dt_hat_flat.imag,
             ],
             dim=1,
         )
@@ -339,13 +344,13 @@ class CommNet(ISACNetBase):
 
         return W_C
     
-    def forward(self, H_eff_H):
+    def forward(self, H_eff_H, g_dt_hat):
         """
         return:
             W_C, shape = (B, M, K), complex
         """
 
-        x = self.encode_channels(H_eff_H)
+        x = self.encode_channels(H_eff_H, g_dt_hat)
 
         y = self.forward_mlp(x)
 
@@ -361,7 +366,8 @@ class RadarNet(ISACNetBase):
     """
     radar beamformer network.
     Input:
-        H_eff_H : (B,K,M), complex
+        H_eff_H     : (B, K, M), complex
+        g_dt_hat_pl : (B, M, 1), complex
         -> input,       shape = (B, input_dim), real
     Output:
         output,         shape = (B, 2*M*RADAR_STREAMS) real
@@ -371,7 +377,7 @@ class RadarNet(ISACNetBase):
     def __init__(self, hidden_dim: int = NET, ckpt_kind: str = "shortterm_radar"):
             super().__init__(ckpt_kind)
 
-            self.in_dim = 2 * UAV_COMM * TX_ANT             # 2*K*M = 16 
+            self.in_dim = 2 * (UAV_COMM * TX_ANT + TX_ANT)   # H_eff_H + g_dt_hat 2*(2*4+4)
             self.hidden_dim = hidden_dim
             self.out_complex_dim = TX_ANT * RADAR_STREAMS   # M*1 = 4 complex entries
 
@@ -398,27 +404,31 @@ class RadarNet(ISACNetBase):
 
         return y
 
-    def encode_channels(self, H_eff_H):
+    def encode_channels(self, H_eff_H, g_dt_hat):
         """
         將含有 PL 的估測等效通道 H_eff_H 轉成 NN real input
 
         H_eff_H : (B,K,M), complex
+        g_dt_hat: (B,M,1), complex
 
         return:
             x, shape = (B, input_dim), real
         """
 
         H_eff_H = torch.as_tensor(H_eff_H,dtype=torch.complex64,device=self.model_device)
+        g_dt_hat = torch.as_tensor(g_dt_hat,dtype=torch.complex64,device=self.model_device)
 
         B = H_eff_H.shape[0]
         # 固定尺度縮放，不改變不同 channel 間的相對大小
-        H_eff_H_scaled = 1.0e4 * H_eff_H
-        H_eff_H_flat = H_eff_H_scaled.reshape(B,-1)
+        H_eff_H_flat = (1.0e4 * H_eff_H).reshape(B,-1)
+        g_dt_hat_flat = (1.0e3 * g_dt_hat).reshape(B,-1)
 
         x = torch.cat(
             [
                 H_eff_H_flat.real,
                 H_eff_H_flat.imag,
+                g_dt_hat_flat.real,
+                g_dt_hat_flat.imag,
             ],
             dim=1,
         )
@@ -444,13 +454,13 @@ class RadarNet(ISACNetBase):
 
         return W_R
 
-    def forward(self, H_eff_H):
+    def forward(self, H_eff_H, g_dt_hat):
         """
         return:
             W_R, shape = (B, M, RADAR_STREAMS), complex
         """
 
-        x = self.encode_channels(H_eff_H)
+        x = self.encode_channels(H_eff_H,g_dt_hat)
 
         y = self.forward_mlp(x)
 
@@ -567,12 +577,7 @@ class ThetaNet(ISACNetBase):
             theta, shape = (B, RIS_UNIT), complex RIS vector
         """
 
-        x = self.encode_channels(
-            h_dk_hat_pl,
-            h_rk_hat_pl,
-            G_hat_pl,
-            g_dt_hat_pl,
-        )
+        x = self.encode_channels(h_dk_hat_pl,h_rk_hat_pl,G_hat_pl,g_dt_hat_pl)
 
         y = self.forward_mlp(x)
 
