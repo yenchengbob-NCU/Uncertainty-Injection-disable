@@ -227,6 +227,7 @@ if __name__ == "__main__":
         epoch_Nominal           = []    # 累積N個batch的Nominal
         epoch_target_snr        = []
         epoch_sensing_penalties = []
+        epoch_sensing_violation_rates = []
 
         for _ in range(N_BATCHE):
             
@@ -248,7 +249,7 @@ if __name__ == "__main__":
 
             W_R_dir = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt_hat)           # 這裡輸出功率正規化 W_R_dir
 
-            W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)      # power 分配
+            W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)              # power 分配
 
             metrics = theta_net.compute_isac_batch_performance(H_eff_H,g_dt_hat,W_C,W_R)
             """ 輸出結果 :
@@ -278,18 +279,22 @@ if __name__ == "__main__":
             # 取輸出結果
             nominal_allUE_rate      = metrics["rate"]                               # (B,K)  所有UE在每筆估測通道的rate
             nominal_target_snr      = metrics["target_snr"]                         # (B,)   每一筆估測通道(線性，因為要線性平均後在計算)
+            nominal_target_snr_db   = metrics["target_snr_db"]                      # (B,), dB
+
             
             # Nominal 計算
             nominal_with_batch    = torch.min(nominal_allUE_rate, dim=1).values     # (B,)   每一筆估測通道，找出所有UE中 rate中最小的
             nominal = torch.mean(nominal_with_batch)                                # scalar 對B筆估測通道min-rate平均
 
-            # Nominal target SNR：先計算目前batch的linear mean
-            nominal_target_snr_mean = torch.mean(nominal_target_snr)       # scalar, linear
+            # Nominal target SNR：linear mean後供epoch顯示
+            nominal_target_snr_mean = torch.mean(nominal_target_snr)
 
-            # 感測懲罰：每個channel使用linear SNR計算violation，再對batch平均
-            sensing_violation = torch.relu(SENSING_SNR_THRESHOLD - nominal_target_snr)  # (B,)
-            sensing_penalty = torch.mean(sensing_violation)   
+            # Nominal sensing violation rate：只供log顯示
+            sensing_violation_rate = torch.mean((nominal_target_snr_db < SENSING_SNR_THRESHOLD_DB).float())
 
+            # 每筆estimated channel的target SNR與4 dB門檻比較
+            sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - nominal_target_snr_db)
+            sensing_penalty = torch.mean(sensing_deficit_db)
             # loss function
             loss = -(nominal) + REG_SENSING_LOSS_WEIGHT  * sensing_penalty
 
@@ -300,6 +305,7 @@ if __name__ == "__main__":
             epoch_Nominal.append(float(nominal.detach().cpu()))
             epoch_target_snr.append(float(nominal_target_snr_mean.detach().cpu()))     
             epoch_sensing_penalties.append(float(sensing_penalty.detach().cpu()))
+            epoch_sensing_violation_rates.append(float(sensing_violation_rate.detach().cpu()))
 
         train_target_snr_mean = float(np.mean(epoch_target_snr))
         train_target_snr_mean_db = 10.0 * np.log10(max(train_target_snr_mean,1e-12))
@@ -309,6 +315,7 @@ if __name__ == "__main__":
             "nominal": float(np.mean(epoch_Nominal)),
             "target_snr_db": train_target_snr_mean_db,
             "sensing_penalty": float(np.mean(epoch_sensing_penalties)),
+            "sensing_violation_rate": float(np.mean(epoch_sensing_violation_rates)),
         }
 
         # ================================
@@ -361,18 +368,22 @@ if __name__ == "__main__":
             # 取輸出結果
             val_nominal_allUE_rate      = val_metrics["rate"]                            # (B,K) 所有UE在每筆估測通道的rate
             val_nominal_target_snr      = val_metrics["target_snr"]                      # (B,) 每一筆估測通道的target SNR，linear
+            val_nominal_target_snr_db = val_metrics["target_snr_db"]                     # (B,), dB
 
             # Nominal計算
             val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=1).values     # (B,) 每一筆估測通道找出所有UE中rate最小的
             val_nominal = torch.mean(val_nominal_with_batch)                            # scalar 對B筆估測通道min-rate平均
-            
-            # Nominal target SNR：linear mean後轉dB
-            val_nominal_target_snr_mean = torch.mean(val_nominal_target_snr)            # scalar, linear
-            val_target_snr_mean_db = 10.0 * torch.log10(val_nominal_target_snr_mean.clamp_min(1e-12))
 
-            # 感測懲罰：每個channel使用linear SNR計算violation，再對validation channels平均
-            val_sensing_violation = torch.relu(SENSING_SNR_THRESHOLD - val_nominal_target_snr)  # (B,)
-            val_sensing_penalty = torch.mean(val_sensing_violation)                             # scalar
+            # Nominal target SNR：linear mean後轉dB
+            val_nominal_target_snr_mean = torch.mean(val_nominal_target_snr)
+            val_target_snr_mean_db = 10.0 * torch.log10(val_nominal_target_snr_mean.clamp_min(1e-12))
+            
+            # Nominal sensing violation rate：只供log顯示
+            val_sensing_violation_rate = torch.mean((val_nominal_target_snr_db < SENSING_SNR_THRESHOLD_DB).float())
+
+            # 每筆estimated channel的target SNR與4 dB門檻比較
+            val_sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - val_nominal_target_snr_db)
+            val_sensing_penalty = torch.mean(val_sensing_deficit_db)
 
             # Loss function
             val_loss = -(val_nominal) + REG_SENSING_LOSS_WEIGHT * val_sensing_penalty
@@ -382,6 +393,7 @@ if __name__ == "__main__":
                 "nominal": float(val_nominal.detach().cpu()),
                 "target_snr_db": float(val_target_snr_mean_db.detach().cpu()),
                 "sensing_penalty": float(val_sensing_penalty.detach().cpu()),
+                "sensing_violation_rate": float(val_sensing_violation_rate.detach().cpu()),
             }
 
         curves["train_loss"].append(train_logs["loss"])
@@ -438,6 +450,10 @@ if __name__ == "__main__":
 
             f"\nTrainpenalty={train_logs['sensing_penalty']:.3f} "
             f"Valpenalty={val_logs['sensing_penalty']:.3f} | "
+
+            f"TrainSenseViolation={100.0 * train_logs['sensing_violation_rate']:.2f}% "
+            f"ValSenseViolation={100.0 * val_logs['sensing_violation_rate']:.2f}%"
+
         )
 
     plot_theta_pretrain_curves(pre_curve_path,pre_curve_dir)

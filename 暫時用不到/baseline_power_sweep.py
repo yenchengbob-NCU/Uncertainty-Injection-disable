@@ -4,7 +4,7 @@ import math
 import numpy as np
 import torch
 from settings import *
-from one_timescale_NN import CommNet
+from 暫時用不到.one_timescale_NN import CommNet
 
 
 # ============================================================

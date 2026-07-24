@@ -45,7 +45,7 @@ UE_LAYOUT = [               # 角度以 RIS 為圓心、全域 x 軸正方向為
 # 場景參數
 # ================================
 TX_ANT   = 4                        # BS  發射天線數 M
-RIS_UNIT = 64                      # RIS 反射單元數 N
+RIS_UNIT = 64                       # RIS 反射單元數 N
 UAV_COMM = 2                        # 通訊 UE 數 K
 RADAR_STREAMS   = 1                 # sensing waveforms 數量 s_r (1不是chu設定,是為了和Demirhan等價)
 PL_EXP_BS_RIS   = 2.3               # 單程PL係數 BS  -> RIS
@@ -69,8 +69,8 @@ SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 0.0     # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT  = 0.0     # rob 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 10.0     # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT  = 0.5      # rob 感測懲罰權重
 
 # ================================
 # dataset 生成
@@ -92,14 +92,14 @@ TAR_OUTAGE_QUANTILE = 0.10
 # 訓練 / 驗證 / 測試
 # ================================
 
-REG_EPOCHS      = 500
-ROB_EPOCHS      = 500
+REG_EPOCHS      = 2000
+ROB_EPOCHS      = 2000
 N_BATCHE        = 50        # 一個epoch 內有多少個BATCH
 BATCH_CHANNELS  = 1000      # 一個BATCH 內有多少個通道
 
 
-REG_LEARNING_RATE = 0.001
-ROB_LEARNING_RATE = 0.001
+REG_LEARNING_RATE = 0.0001
+ROB_LEARNING_RATE = 0.0001
 
 # ================================
 # 資料夾結構

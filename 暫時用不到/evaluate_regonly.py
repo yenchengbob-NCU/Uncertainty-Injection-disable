@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
-from one_timescale_NN import CommNet, RadarNet, ThetaNet
+from 暫時用不到.one_timescale_NN import CommNet, RadarNet, ThetaNet
 
 # ================================
 # Helpers

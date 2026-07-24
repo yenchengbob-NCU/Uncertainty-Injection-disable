@@ -9,7 +9,7 @@ from pathlib import Path
 # ================================
 # Sweep penalties
 # ================================
-REG_PENALTY_SWEEP = [0.0, 1.0, 3.0, 5.0, 7.0, 10.0 ]
+REG_PENALTY_SWEEP = [0.0, 1.0, 5.0, 10.0, 100.0, 2000.0 ]
 
 ROB_PENALTY_SWEEP = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0 ]
 
@@ -17,8 +17,8 @@ ROB_PENALTY_SWEEP = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0 ]
 # ================================
 # 執行選項
 # ================================
-RUN_REG = True
-RUN_ROB = False
+RUN_REG = False
+RUN_ROB = True
 
 # False：任何一次訓練失敗就停止
 # True ：記錄失敗後繼續下一個 penalty

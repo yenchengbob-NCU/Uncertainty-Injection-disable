@@ -9,7 +9,7 @@ from tqdm import trange
 
 from settings import *
 from baseline import make_rzf_beamformer, RZF_LAMBDA
-from one_timescale_NN import CommNet, ThetaNet
+from 暫時用不到.one_timescale_NN import CommNet, ThetaNet
 
 # ================================
 # Helpers

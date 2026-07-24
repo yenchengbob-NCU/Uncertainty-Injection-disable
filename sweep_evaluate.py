@@ -14,7 +14,8 @@ from two_timescale_NN import CommNet, RadarNet, ThetaNet
 # ================================
 # Penalty sweep
 # ================================
-REG_PENALTY_SWEEP = [0.0, 1.0, 3.0, 5.0, 7.0, 10.0 ]
+REG_PENALTY_SWEEP = [0.0, 1.0, 5.0, 10.0, 100.0, 2000.0 ]
+
 ROB_PENALTY_SWEEP = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0 ]
 
 
