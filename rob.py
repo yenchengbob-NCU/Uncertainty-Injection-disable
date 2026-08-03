@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import math
+import argparse
 import numpy as np
 import torch
 import torch.optim as optim
@@ -8,7 +9,7 @@ import matplotlib.pyplot as plt
 from tqdm import trange
 
 from settings import *
-from baseline import beamformers_power_split
+# from baseline import beamformers_power_split
 from two_timescale_NN import CommNet, RadarNet, ThetaNet
 
 # ================================
@@ -269,6 +270,10 @@ def complex_awgn(shape, variance: float, device, cdtype: torch.dtype):
 # Main
 # ================================
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="Train two-timescale ROB networks.")
+    parser.add_argument("--pretrain",action="store_true",help="Load the pretrained NS-MRT RadarNet checkpoint.")
+    args = parser.parse_args()
     
     comm_net = CommNet().to(DEVICE)
     radar_net = RadarNet().to(DEVICE)
@@ -288,16 +293,14 @@ if __name__ == "__main__":
     # ================================
     # Train ROB
     # ================================
-    # 僅訓練 CommNet 與 RadarNet，固定 pretrained ThetaNet
-    optimizer = optim.Adam(list(comm_net.parameters())+ list(radar_net.parameters()),lr=ROB_LEARNING_RATE)
-
     rob_comm_ckpt  = os.path.join(ROB_CKPT_DIR, "two_timescale_comm_rob.ckpt")
     rob_radar_ckpt = os.path.join(ROB_CKPT_DIR, "two_timescale_radar_rob.ckpt")
     rob_curve_path = os.path.join(ROB_CKPT_DIR, "two_timescale_rob_curves.npz")
     rob_curve_dir  = os.path.join(ROB_CKPT_DIR, "two_timescale_rob_curves")
 
     # 已經訓練的RIS ckpt 路徑
-    ris_only_ckpt  = os.path.join(PRETRAIN_DIR, "ris_only.ckpt")
+    ris_only_ckpt = os.path.join(PRETRAIN_DIR,"ris_only.ckpt")
+    radar_pretrain_ckpt = os.path.join(PRETRAIN_DIR,"radar_ns_mrt_pretrain.ckpt")
 
     os.makedirs(rob_curve_dir, exist_ok=True)
 
@@ -325,6 +328,22 @@ if __name__ == "__main__":
 
         "train_noise_power": [],
         "val_noise_power": [],
+
+        # Beamformer transmit power
+        "train_comm_tx_power": [],
+        "val_comm_tx_power": [],
+
+        "train_radar_tx_power": [],
+        "val_radar_tx_power": [],
+
+        "train_total_tx_power": [],
+        "val_total_tx_power": [],
+
+        "train_tx_power_penalty": [],
+        "val_tx_power_penalty": [],
+
+        "train_tx_power_violation_rate": [],
+        "val_tx_power_violation_rate": [],
     }
 
     # 訓練參數
@@ -350,28 +369,55 @@ if __name__ == "__main__":
     print(f"N_BATCHE                : {N_BATCHE}")
     print(f"BATCH_CHANNELS          : {BATCH_CHANNELS}")
     print(f"ROB learning rate       : {ROB_LEARNING_RATE}")
+    print(f"RadarNet initialization : {'NS-MRT pretrained' if args.pretrain else 'Random'}")
     print(f"Sensing SNR threshold   : {SENSING_SNR_THRESHOLD_DB} dB")
     print(f"Sensing penalty weight  : {ROB_SENSING_LOSS_WEIGHT}")
+    print(f"TX power penalty weight : {ROB_TX_POWER_LOSS_WEIGHT}")
     print(f"Outage quantile         : {OUTAGE_QUANTILE}")
     print("=" * 90)
-
-    # 載入已訓練好的 ThetaNet
-    """
-    載入並固定 pretrained ThetaNet
-    僅訓練 CommNet 與 RadarNet。
-    """
-    if not os.path.exists(ris_only_ckpt):
-        raise FileNotFoundError(f"找不到 ThetaNet checkpoint: {ris_only_ckpt}")
 
     theta_net.load_model(ris_only_ckpt,strict=True,verbose=True)
     theta_net.eval()
 
-    # 不更新theta net
+    # 不更新ThetaNet
     for parameter in theta_net.parameters():
         parameter.requires_grad_(False)
 
+
+    # ================================
+    # RadarNet initialization
+    # ================================
+    if args.pretrain:
+        if not os.path.exists(radar_pretrain_ckpt):
+            raise FileNotFoundError(f"找不到 RadarNet pretrain checkpoint: {radar_pretrain_ckpt}")
+
+        radar_net.load_model(radar_pretrain_ckpt,strict=True,verbose=True)
+        radar_init_mode = "NS-MRT pretrained"
+
+        print(f"[INFO] Loaded RadarNet pretrain checkpoint: {radar_pretrain_ckpt}")
+
+    else:
+        # 不載入checkpoint，保留RadarNet建立時的隨機初始化權重
+        radar_init_mode = "Random initialization"
+
+        print("[INFO] RadarNet uses random initialization.")
+
+
+    # 不論是否使用預訓練，正式ROB訓練都會更新RadarNet
+    for parameter in radar_net.parameters():
+        parameter.requires_grad_(True)
+
+
+    # CommNet固定從隨機初始化開始
+    # RadarNet由--pretrain決定使用預訓練或隨機初始化
+    optimizer = optim.Adam(list(comm_net.parameters()) + list(radar_net.parameters()),lr=ROB_LEARNING_RATE)
+
+    print("[INFO] ThetaNet is frozen.")
+    print(f"[INFO] RadarNet initialization mode: {radar_init_mode}")
+    print("[INFO] CommNet and RadarNet remain trainable during ROB joint training.")
+
     # 開始訓練
-    for epoch in trange(ROB_EPOCHS, desc="ROB Training"):
+    for epoch in trange(ROB_EPOCHS,desc="ROB Training"):
         
         comm_net.train()
         radar_net.train()
@@ -388,6 +434,12 @@ if __name__ == "__main__":
 
         epoch_sensing_violation_rates = []
         epoch_sensing_channel_failure_rates = []
+
+        epoch_comm_tx_power = []
+        epoch_radar_tx_power = []
+        epoch_total_tx_power = []
+        epoch_tx_power_penalties = []
+        epoch_tx_power_violation_rates = []
 
         # 一個epoch 有 N_BATCHE 個 batch , 一個 batch 有BATCH_CHANNELS個估測通道
         # 一個估測通道有S個 sample
@@ -409,11 +461,22 @@ if __name__ == "__main__":
                 # 計算出等效通道
                 H_eff_H = comm_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
 
-            # 算出W_C,W_R
-            W_C_dir = comm_net(H_eff_H,g_dt_hat)  # 正規化
-            W_R_dir = radar_net(H_eff_H,g_dt_hat) # 正規化
+            # NN直接輸出beamformer，同時學習方向與power allocation
+            W_C_raw = comm_net(H_eff_H,g_dt_hat)
+            W_R_raw = radar_net(H_eff_H,g_dt_hat)
 
-            W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)      # power 分配
+            # 每筆estimated channel對應的communication與sensing power
+            W_C_power = torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2)).real       # (B,)
+            W_R_power = torch.sum(torch.abs(W_R_raw) ** 2,dim=(1,2)).real       # (B,)
+            total_tx_power = W_C_power + W_R_power                              # (B,)
+
+            # 每筆estimated channel都必須滿足 P_C + P_R <= TRANSMIT_POWER_TOTAL
+            total_tx_power_ratio = total_tx_power / TRANSMIT_POWER_TOTAL
+            tx_power_excess_ratio = torch.relu(total_tx_power_ratio - 1.0)
+            tx_power_penalty = torch.mean(tx_power_excess_ratio ** 2)
+
+            # 只供log顯示：有多少estimated channels超過總功率
+            tx_power_violation_rate = torch.mean((total_tx_power > TRANSMIT_POWER_TOTAL).float())
 
 
             # ================================
@@ -444,9 +507,10 @@ if __name__ == "__main__":
             # 複製theta
             theta_rep = theta.unsqueeze(0).expand(S, B, N)
 
-            # 複製W_C & W_R
-            W_C_rep = W_C.unsqueeze(0).expand(S, B, M, K)
-            W_R_rep = W_R.unsqueeze(0).expand(S,B,M,RADAR_STREAMS)
+            # 複製W_C_raw與W_R_raw
+            # 同一筆estimated channel的S組injection共用相同beamformer
+            W_C_rep = W_C_raw.unsqueeze(0).expand(S,B,M,K)
+            W_R_rep = W_R_raw.unsqueeze(0).expand(S,B,M,RADAR_STREAMS)
 
             # 為了使用(comm_net.)副函式,先將4維壓到3維"注意! 此舉不會破壞5%的抽取"
             h_dk_flat  = h_dk_inj.reshape(S*B, M, K)
@@ -524,7 +588,7 @@ if __name__ == "__main__":
             sensing_channel_failure_rate = torch.mean((sensing_violation_per_channel > TAR_OUTAGE_QUANTILE).float())    # scalar
 
             # loss function
-            loss = -robust + ROB_SENSING_LOSS_WEIGHT * sensing_penalty
+            loss = -robust + ROB_SENSING_LOSS_WEIGHT * sensing_penalty + ROB_TX_POWER_LOSS_WEIGHT * tx_power_penalty
 
             loss.backward()     # 反向傳播
             optimizer.step()    # 更新NN權重
@@ -543,6 +607,12 @@ if __name__ == "__main__":
             epoch_radar_interf_power.append(robust_radar_interf_power.detach().cpu().numpy())
             epoch_noise_power.append(float(robust_noise.detach().cpu()))
         
+            epoch_comm_tx_power.append(float(torch.mean(W_C_power).detach().cpu()))
+            epoch_radar_tx_power.append(float(torch.mean(W_R_power).detach().cpu()))
+            epoch_total_tx_power.append(float(torch.mean(total_tx_power).detach().cpu()))
+            epoch_tx_power_penalties.append(float(tx_power_penalty.detach().cpu()))
+            epoch_tx_power_violation_rates.append(float(tx_power_violation_rate.detach().cpu()))
+
         train_target_snr_mean = float(np.mean(epoch_target_snr))
         train_target_snr_mean_db = 10.0 * np.log10(max(train_target_snr_mean,1e-12))
 
@@ -558,6 +628,12 @@ if __name__ == "__main__":
             "comm_interf_power": np.mean(np.stack(epoch_comm_interf_power,axis=0),axis=0),
             "radar_interf_power": np.mean(np.stack(epoch_radar_interf_power,axis=0),axis=0),
             "noise_power": float(np.mean(epoch_noise_power)),
+
+            "comm_tx_power": float(np.mean(epoch_comm_tx_power)),
+            "radar_tx_power": float(np.mean(epoch_radar_tx_power)),
+            "total_tx_power": float(np.mean(epoch_total_tx_power)),
+            "tx_power_penalty": float(np.mean(epoch_tx_power_penalties)),
+            "tx_power_violation_rate": float(np.mean(epoch_tx_power_violation_rates)),
         }
 
         # ================================
@@ -580,12 +656,21 @@ if __name__ == "__main__":
             # 根據 estimated channels 與 val_theta 組成 estimated effective channel
             val_H_eff_H = comm_net.compute_effective_channel(val_h_dk,val_h_rk,val_G,val_theta)
 
-            # 由本 epoch 的 CommNet 與 RadarNet 產生 unit-power beam directions
-            val_W_C_dir = comm_net(val_H_eff_H,val_g_dt)
-            val_W_R_dir = radar_net(val_H_eff_H,val_g_dt)
+            # 由本epoch的CommNet與RadarNet直接產生beamformer
+            # NN同時決定beam direction與power allocation
+            val_W_C_raw = comm_net(val_H_eff_H,val_g_dt)
+            val_W_R_raw = radar_net(val_H_eff_H,val_g_dt)
 
-            # 固定分配 0.4P communication power 與 0.6P sensing power
-            val_W_C,val_W_R = beamformers_power_split(val_W_C_dir,val_W_R_dir)
+            # 每筆validation estimated channel的beamformer power
+            val_W_C_power = torch.sum(torch.abs(val_W_C_raw) ** 2,dim=(1,2)).real
+            val_W_R_power = torch.sum(torch.abs(val_W_R_raw) ** 2,dim=(1,2)).real
+            val_total_tx_power = val_W_C_power + val_W_R_power
+
+            val_total_tx_power_ratio = val_total_tx_power / TRANSMIT_POWER_TOTAL
+            val_tx_power_excess_ratio = torch.relu(val_total_tx_power_ratio - 1.0)
+            val_tx_power_penalty = torch.mean(val_tx_power_excess_ratio ** 2)
+
+            val_tx_power_violation_rate = torch.mean((val_total_tx_power > TRANSMIT_POWER_TOTAL).float())
 
             val_S, val_B, val_M, val_N, val_K = INJECTION_SAMPLES, val_h_dk.shape[0], TX_ANT, RIS_UNIT, UAV_COMM
 
@@ -610,8 +695,8 @@ if __name__ == "__main__":
             # 同一筆 estimated channel 的 val_S 筆 injected channels
             # 共用同一組 theta、W_C 與 W_R
             val_theta_rep = val_theta.unsqueeze(0).expand(val_S,val_B,val_N)
-            val_W_C_rep = val_W_C.unsqueeze(0).expand(val_S,val_B,val_M,val_K)
-            val_W_R_rep = val_W_R.unsqueeze(0).expand(val_S,val_B,val_M,RADAR_STREAMS)
+            val_W_C_rep = val_W_C_raw.unsqueeze(0).expand(val_S,val_B,val_M,val_K)
+            val_W_R_rep = val_W_R_raw.unsqueeze(0).expand(val_S,val_B,val_M,RADAR_STREAMS)
 
             # 將 validation 的 S 與 B 維度壓平，供共用 physics functions 使用
             val_h_dk_flat = val_h_dk_inj.reshape(val_S*val_B,val_M,val_K)
@@ -693,7 +778,7 @@ if __name__ == "__main__":
             val_sensing_channel_failure_rate = torch.mean((val_sensing_violation_per_channel > TAR_OUTAGE_QUANTILE).float())     # scalar
 
             # loss function
-            val_loss = -val_robust + ROB_SENSING_LOSS_WEIGHT * val_sensing_penalty
+            val_loss = -val_robust + ROB_SENSING_LOSS_WEIGHT * val_sensing_penalty + ROB_TX_POWER_LOSS_WEIGHT * val_tx_power_penalty
 
         val_logs = {
             "loss": float(val_loss.detach().cpu()),
@@ -707,6 +792,12 @@ if __name__ == "__main__":
             "comm_interf_power": val_robust_comm_interf_power.detach().cpu().numpy(),
             "radar_interf_power": val_robust_radar_interf_power.detach().cpu().numpy(),
             "noise_power": float(val_robust_noise.detach().cpu()),
+
+            "comm_tx_power": float(torch.mean(val_W_C_power).detach().cpu()),
+            "radar_tx_power": float(torch.mean(val_W_R_power).detach().cpu()),
+            "total_tx_power": float(torch.mean(val_total_tx_power).detach().cpu()),
+            "tx_power_penalty": float(val_tx_power_penalty.detach().cpu()),
+            "tx_power_violation_rate": float(val_tx_power_violation_rate.detach().cpu()),
         }
 
         curves["train_loss"].append(train_logs["loss"])
@@ -732,6 +823,21 @@ if __name__ == "__main__":
 
         curves["train_noise_power"].append(train_logs["noise_power"])
         curves["val_noise_power"].append(val_logs["noise_power"])
+
+        curves["train_comm_tx_power"].append(train_logs["comm_tx_power"])
+        curves["val_comm_tx_power"].append(val_logs["comm_tx_power"])
+
+        curves["train_radar_tx_power"].append(train_logs["radar_tx_power"])
+        curves["val_radar_tx_power"].append(val_logs["radar_tx_power"])
+
+        curves["train_total_tx_power"].append(train_logs["total_tx_power"])
+        curves["val_total_tx_power"].append(val_logs["total_tx_power"])
+
+        curves["train_tx_power_penalty"].append(train_logs["tx_power_penalty"])
+        curves["val_tx_power_penalty"].append(val_logs["tx_power_penalty"])
+
+        curves["train_tx_power_violation_rate"].append(train_logs["tx_power_violation_rate"])
+        curves["val_tx_power_violation_rate"].append(val_logs["tx_power_violation_rate"])
 
         np.savez(
             rob_curve_path,
@@ -763,6 +869,15 @@ if __name__ == "__main__":
             )
             break
 
+        train_comm_power_ratio = train_logs["comm_tx_power"] / TRANSMIT_POWER_TOTAL
+        train_radar_power_ratio = train_logs["radar_tx_power"] / TRANSMIT_POWER_TOTAL
+        train_total_power_ratio = train_logs["total_tx_power"] / TRANSMIT_POWER_TOTAL
+
+        val_comm_power_ratio = val_logs["comm_tx_power"] / TRANSMIT_POWER_TOTAL
+        val_radar_power_ratio = val_logs["radar_tx_power"] / TRANSMIT_POWER_TOTAL
+        val_total_power_ratio = val_logs["total_tx_power"] / TRANSMIT_POWER_TOTAL
+
+
         # 印出每個epoch log
         print(
             f"\n[Epoch {epoch + 1:03d}/{ROB_EPOCHS}] "
@@ -783,6 +898,19 @@ if __name__ == "__main__":
             #f"ValRadarInterf={fmt_vec_sci(val_logs['radar_interf_power'],precision=3)}"
             #f"\nTrainNoise={train_logs['noise_power']:.3e} "
             #f"ValNoise={val_logs['noise_power']:.3e}"
+            f"\nTrainPower W_C_raw={train_logs['comm_tx_power']:.6f} W "
+            f"W_R_raw={train_logs['radar_tx_power']:.6f} W | "
+            f"W_C:W_R=({train_comm_power_ratio:.4f}:{train_radar_power_ratio:.4f}) "
+            f"Total/P_T={train_total_power_ratio:.4f} "
+            f"Violation={100.0 * train_logs['tx_power_violation_rate']:.2f}% "
+            f"Penalty={train_logs['tx_power_penalty']:.6e}"
+
+            f"\nValPower   W_C_raw={val_logs['comm_tx_power']:.6f} W "
+            f"W_R_raw={val_logs['radar_tx_power']:.6f} W | "
+            f"W_C:W_R=({val_comm_power_ratio:.4f}:{val_radar_power_ratio:.4f}) "
+            f"Total/P_T={val_total_power_ratio:.4f} "
+            f"Violation={100.0 * val_logs['tx_power_violation_rate']:.2f}% "
+            f"Penalty={val_logs['tx_power_penalty']:.6e}"
         )
 
     plot_rob_curves(rob_curve_path,rob_curve_dir)

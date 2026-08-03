@@ -3,8 +3,8 @@ import math
 import numpy as np
 from settings import *
 
-RICIAN_KAPPA = 2.0   # 線性尺度
-Debug = False         # 終端印出檢查
+RICIAN_KAPPA = 2.0    # 線性尺度
+Debug = True         # 終端印出檢查
 # ================================
 # 基本幾何 / 小工具
 # ================================

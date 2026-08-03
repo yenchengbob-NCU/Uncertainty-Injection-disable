@@ -18,8 +18,7 @@ with np.load(dataset_path) as data:
 B, M, _ = g_dt.shape
 
 total_power = torch.as_tensor(TRANSMIT_POWER_TOTAL,dtype=torch.float32,device=DEVICE)
-
-noise = torch.as_tensor(NOISE_POWER,dtype=torch.float32,device=DEVICE)
+noise       = torch.as_tensor(NOISE_POWER,dtype=torch.float32,device=DEVICE)
 
 
 # ============================================================
@@ -31,7 +30,7 @@ g_dt_norm = torch.sqrt(torch.sum(torch.abs(g_dt) ** 2,dim=(1,2),keepdim=True).re
 
 W_R_dir = g_dt / g_dt_norm                    # (B,M,1), unit Frobenius norm
 
-radar_power = 0.6 * total_power
+radar_power = 1.0 * total_power
 W_R = torch.sqrt(radar_power) * W_R_dir       # (B,M,1), full TX power
 
 

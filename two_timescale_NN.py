@@ -357,9 +357,9 @@ class CommNet(ISACNetBase):
         W_C_raw = self.decode_comm_beamformer(y)
 
         W_C_power = torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2),keepdim=True).real
-        W_C = W_C_raw / torch.sqrt(W_C_power.clamp_min(1e-12))  # 功率正規化
+        # W_C = W_C_raw / torch.sqrt(W_C_power.clamp_min(1e-12))  # 功率正規化
 
-        return W_C
+        return W_C_raw
 
 
 class RadarNet(ISACNetBase):
@@ -467,9 +467,9 @@ class RadarNet(ISACNetBase):
         W_R_raw = self.decode_sensing_beamformer(y)
 
         W_R_power = torch.sum(torch.abs(W_R_raw) ** 2,dim=(1,2),keepdim=True).real
-        W_R = W_R_raw / torch.sqrt(W_R_power.clamp_min(1e-12))  # 功率正規化
+        # W_R = W_R_raw / torch.sqrt(W_R_power.clamp_min(1e-12))  # 功率正規化
 
-        return W_R
+        return W_R_raw
     
 
 class ThetaNet(ISACNetBase):

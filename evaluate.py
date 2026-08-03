@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 from settings import *
-from baseline import beamformers_power_split
+# from baseline import beamformers_power_split
 from two_timescale_NN import CommNet, RadarNet, ThetaNet
 
 
@@ -123,7 +123,7 @@ if __name__ == "__main__":
         if reg_W_R_dir.shape != (B,M,R):
             raise ValueError(f"reg_W_R_dir shape error: expected {(B,M,R)}, got {tuple(reg_W_R_dir.shape)}")
 
-        reg_W_C,reg_W_R = beamformers_power_split(reg_W_C_dir,reg_W_R_dir)
+        # reg_W_C,reg_W_R = beamformers_power_split(reg_W_C_dir,reg_W_R_dir)
 
         # ================================================================
         # 2.使用相同 pretrained theta 設計 ROB W_C、W_R
@@ -144,7 +144,7 @@ if __name__ == "__main__":
         if rob_W_R_dir.shape != (B,M,R):
             raise ValueError(f"rob_W_R_dir shape error: expected {(B,M,R)}, got {tuple(rob_W_R_dir.shape)}")
 
-        rob_W_C,rob_W_R = beamformers_power_split(rob_W_C_dir,rob_W_R_dir)
+        # rob_W_C,rob_W_R = beamformers_power_split(rob_W_C_dir,rob_W_R_dir)
 
         # ================================================================
         # 3. 一次性建立完整 injection channels，不使用 chunk
@@ -171,8 +171,8 @@ if __name__ == "__main__":
         #    固定使用相同 theta、REG W_C、REG W_R
         # ================================================================
         test_theta_rep = test_theta.unsqueeze(0).expand(S,B,N)
-        reg_W_C_rep = reg_W_C.unsqueeze(0).expand(S,B,M,K)
-        reg_W_R_rep = reg_W_R.unsqueeze(0).expand(S,B,M,R)
+        reg_W_C_rep = reg_W_C_dir.unsqueeze(0).expand(S,B,M,K)
+        reg_W_R_rep = reg_W_R_dir.unsqueeze(0).expand(S,B,M,R)
 
         # 壓平 S、B 維度，供共用 physics functions 使用
         inj_h_dk_flat = inj_h_dk.reshape(S*B,M,K)
@@ -259,8 +259,8 @@ if __name__ == "__main__":
         #
         # 不重新產生 injection errors。
         # ================================================================
-        rob_W_C_rep = rob_W_C.unsqueeze(0).expand(S,B,M,K)
-        rob_W_R_rep = rob_W_R.unsqueeze(0).expand(S,B,M,R)
+        rob_W_C_rep = rob_W_C_dir.unsqueeze(0).expand(S,B,M,K)
+        rob_W_R_rep = rob_W_R_dir.unsqueeze(0).expand(S,B,M,R)
 
         rob_W_C_flat = rob_W_C_rep.reshape(S*B,M,K)
         rob_W_R_flat = rob_W_R_rep.reshape(S*B,M,R)

@@ -7,7 +7,7 @@ import torch
 import matplotlib.pyplot as plt
 
 from settings import *
-from baseline import beamformers_power_split
+# from baseline import beamformers_power_split
 from two_timescale_NN import CommNet, RadarNet, ThetaNet
 
 
@@ -146,22 +146,22 @@ with torch.no_grad():
     reg_H_eff_H_hat = reg_comm_net.compute_effective_channel(test_h_dk_hat,test_h_rk_hat,test_G_hat,test_theta)
     reg_W_C_dir = reg_comm_net(reg_H_eff_H_hat,test_g_dt_hat)
     reg_W_R_dir = reg_radar_net(reg_H_eff_H_hat,test_g_dt_hat)
-    reg_W_C,reg_W_R = beamformers_power_split(reg_W_C_dir,reg_W_R_dir)
+    # reg_W_C,reg_W_R = beamformers_power_split(reg_W_C_dir,reg_W_R_dir)
 
     # ROB beamformers：只由estimated channels設計一次
     rob_H_eff_H_hat = rob_comm_net.compute_effective_channel(test_h_dk_hat,test_h_rk_hat,test_G_hat,test_theta)
     rob_W_C_dir = rob_comm_net(rob_H_eff_H_hat,test_g_dt_hat)
     rob_W_R_dir = rob_radar_net(rob_H_eff_H_hat,test_g_dt_hat)
-    rob_W_C,rob_W_R = beamformers_power_split(rob_W_C_dir,rob_W_R_dir)
+    # rob_W_C,rob_W_R = beamformers_power_split(rob_W_C_dir,rob_W_R_dir)
 
     # 複製固定theta與beamformers
     theta_flat = test_theta.unsqueeze(0).expand(S,B,N).reshape(S*B,N)
 
-    reg_W_C_flat = reg_W_C.unsqueeze(0).expand(S,B,M,K).reshape(S*B,M,K)
-    reg_W_R_flat = reg_W_R.unsqueeze(0).expand(S,B,M,R).reshape(S*B,M,R)
+    reg_W_C_flat = reg_W_C_dir.unsqueeze(0).expand(S,B,M,K).reshape(S*B,M,K)
+    reg_W_R_flat = reg_W_R_dir.unsqueeze(0).expand(S,B,M,R).reshape(S*B,M,R)
 
-    rob_W_C_flat = rob_W_C.unsqueeze(0).expand(S,B,M,K).reshape(S*B,M,K)
-    rob_W_R_flat = rob_W_R.unsqueeze(0).expand(S,B,M,R).reshape(S*B,M,R)
+    rob_W_C_flat = rob_W_C_dir.unsqueeze(0).expand(S,B,M,K).reshape(S*B,M,K)
+    rob_W_R_flat = rob_W_R_dir.unsqueeze(0).expand(S,B,M,R).reshape(S*B,M,R)
 
     # Estimated channels的每筆block power，只計算一次
     h_dk_power = torch.mean(torch.abs(test_h_dk_hat) ** 2,dim=(1,2),keepdim=True).real.unsqueeze(0)

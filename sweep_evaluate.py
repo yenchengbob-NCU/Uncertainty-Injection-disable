@@ -7,16 +7,16 @@ import torch
 import matplotlib.pyplot as plt
 
 from settings import *
-from baseline import beamformers_power_split
+# from baseline import beamformers_power_split
 from two_timescale_NN import CommNet, RadarNet, ThetaNet
 
 
 # ================================
 # Penalty sweep
 # ================================
-REG_PENALTY_SWEEP = [0.0, 1.0, 5.0, 10.0, 100.0, 2000.0 ]
+REG_PENALTY_SWEEP = [ 1.0, 5.0, 10.0, 100.0, 2000.0 ]
 
-ROB_PENALTY_SWEEP = [0.0, 0.5, 1.0, 2.0, 5.0, 10.0 ]
+ROB_PENALTY_SWEEP = [ 0.5, 1.0, 2.0, 5.0, 10.0 ]
 
 
 # ================================
@@ -108,12 +108,12 @@ def evaluate_checkpoint(
                 f"W_R_dir expected {(B,M,R)}, got {tuple(W_R_dir.shape)}"
             )
 
-        W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)
+        # W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)
 
         # 同一筆 estimated channel 的 S 筆 injected channels
         # 共用同一組 W_C、W_R
-        W_C_rep = W_C.unsqueeze(0).expand(S,B,M,K)
-        W_R_rep = W_R.unsqueeze(0).expand(S,B,M,R)
+        W_C_rep = W_C_dir.unsqueeze(0).expand(S,B,M,K)
+        W_R_rep = W_R_dir.unsqueeze(0).expand(S,B,M,R)
 
         W_C_flat = W_C_rep.reshape(S*B,M,K)
         W_R_flat = W_R_rep.reshape(S*B,M,R)
@@ -167,8 +167,6 @@ def evaluate_checkpoint(
     del radar_net
     del W_C_dir
     del W_R_dir
-    del W_C
-    del W_R
     del W_C_rep
     del W_R_rep
     del W_C_flat

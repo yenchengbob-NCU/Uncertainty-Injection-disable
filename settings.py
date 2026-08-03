@@ -32,7 +32,7 @@ if torch.cuda.is_available():
 # ================================
 Q_BS      = (0.0 , 0.0)     # 基站座標
 Q_RIS     = (50.0, 0.0)     # RIS座標
-Q_UAV_TAR = (10.0, 2.0)     # 感測物座標
+Q_UAV_TAR = (8.6 , 5.0)     # 感測物座標
 UE_RADIUS = 3.0             # 用戶距RIS半徑
 UE_LAYOUT = [               # 角度以 RIS 為圓心、全域 x 軸正方向為 0 度
     [49.2235,  2.8978],     # 105度
@@ -62,15 +62,18 @@ TRANSMIT_POWER_TOTAL    = 1.26      # 傳輸功率(W)
 # ================================
 # ISAC / 損失權重預設值
 # ================================
-SENSING_SNR_THRESHOLD_DB = 4.0
+SENSING_SNR_THRESHOLD_DB = 6.0
 SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 
 
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 10.0     # reg 感測懲罰權重
-ROB_SENSING_LOSS_WEIGHT  = 0.5      # rob 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 1.0     # reg 感測懲罰權重
+ROB_SENSING_LOSS_WEIGHT  = 1.0      # rob 感測懲罰權重
+
+TX_POWER_LOSS_WEIGHT     = 1000.0     # txpower 懲罰 
+ROB_TX_POWER_LOSS_WEIGHT = 1000.0  
 
 # ================================
 # dataset 生成
