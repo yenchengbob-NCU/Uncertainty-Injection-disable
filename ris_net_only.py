@@ -4,8 +4,8 @@ import numpy as np
 import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from tqdm import trange
 
+from tqdm import trange
 from settings import *
 from baseline import make_rzf_beamformer, mrt_in_H_eff_H_nullspace, beamformers_power_split, RZF_LAMBDA
 from two_timescale_NN import ThetaNet
@@ -368,7 +368,7 @@ if __name__ == "__main__":
             # 取輸出結果
             val_nominal_allUE_rate      = val_metrics["rate"]                            # (B,K) 所有UE在每筆估測通道的rate
             val_nominal_target_snr      = val_metrics["target_snr"]                      # (B,) 每一筆估測通道的target SNR，linear
-            val_nominal_target_snr_db = val_metrics["target_snr_db"]                     # (B,), dB
+            val_nominal_target_snr_db   = val_metrics["target_snr_db"]                   # (B,), dB
 
             # Nominal計算
             val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=1).values     # (B,) 每一筆估測通道找出所有UE中rate最小的

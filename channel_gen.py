@@ -4,7 +4,7 @@ import numpy as np
 from settings import *
 
 RICIAN_KAPPA = 2.0    # 線性尺度
-Debug = True         # 終端印出檢查
+Debug = True          # 終端印出檢查
 # ================================
 # 基本幾何 / 小工具
 # ================================
@@ -306,6 +306,7 @@ def build_and_save_dataset(channels, save_path, dataset_name):
     np.savez_compressed(save_path, **dataset)
 
     print(f"[{dataset_name}] dataset 已儲存到：{save_path}")
+
 
 if __name__ == "__main__":
     print("[INFO] 依 settings.py 的 固定layouts 生成 datasets ...")

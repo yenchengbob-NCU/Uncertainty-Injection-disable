@@ -36,8 +36,6 @@ Q_UAV_TAR = (8.6 , 5.0)     # 感測物座標
 UE_RADIUS = 3.0             # 用戶距RIS半徑
 UE_LAYOUT = [               # 角度以 RIS 為圓心、全域 x 軸正方向為 0 度
     [49.2235,  2.8978],     # 105度
-    #[47.7019,  1.9284],     # 140度
-    #[47.7019, -1.9284],     # 220度
     [49.2235, -2.8978],     # 255度
 ]
 
@@ -69,11 +67,11 @@ SENSING_SNR_THRESHOLD = 10 ** (SENSING_SNR_THRESHOLD_DB / 10.0)
 # ================================
 # 訓練損失權重
 # ================================
-REG_SENSING_LOSS_WEIGHT  = 1.0     # reg 感測懲罰權重
+REG_SENSING_LOSS_WEIGHT  = 1.0      # reg 感測懲罰權重
 ROB_SENSING_LOSS_WEIGHT  = 1.0      # rob 感測懲罰權重
 
-TX_POWER_LOSS_WEIGHT     = 1000.0     # txpower 懲罰 
-ROB_TX_POWER_LOSS_WEIGHT = 1000.0  
+TX_POWER_LOSS_WEIGHT     = 100.0     # txpower 懲罰 
+ROB_TX_POWER_LOSS_WEIGHT = 100.0  
 
 # ================================
 # dataset 生成
@@ -114,7 +112,7 @@ REG_PENALTY_TAG = f"reg_{REG_SENSING_LOSS_WEIGHT:g}"
 ROB_PENALTY_TAG = f"rob_{ROB_SENSING_LOSS_WEIGHT:g}"
 
 DATA_DIR        = os.path.join(BASE_RUN_DIR, "shared_data")         # shared dataset
-PRETRAIN_DIR    = os.path.join(BASE_RUN_DIR, "pretrain")            #
+PRETRAIN_DIR    = os.path.join(BASE_RUN_DIR, "pretrain")            
 
 REG_CKPT_DIR    = os.path.join(BASE_RUN_DIR, "regular",REG_PENALTY_TAG)
 ROB_CKPT_DIR    = os.path.join(BASE_RUN_DIR, "robust" ,ROB_PENALTY_TAG)

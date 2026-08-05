@@ -6,7 +6,7 @@ import torch
 from settings import *
 from two_timescale_NN import CommNet
 
-Debug = True                        # 終端印出檢查
+Debug = True                         # 終端印出檢查
 
 RZF_LAMBDA = 1e-9                    # 設定為 0 就是ZF
 # ============================================================

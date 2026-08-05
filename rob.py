@@ -471,9 +471,8 @@ if __name__ == "__main__":
             total_tx_power = W_C_power + W_R_power                              # (B,)
 
             # 每筆estimated channel都必須滿足 P_C + P_R <= TRANSMIT_POWER_TOTAL
-            total_tx_power_ratio = total_tx_power / TRANSMIT_POWER_TOTAL
-            tx_power_excess_ratio = torch.relu(total_tx_power_ratio - 1.0)
-            tx_power_penalty = torch.mean(tx_power_excess_ratio ** 2)
+            tx_power_excess  = torch.relu(total_tx_power - TRANSMIT_POWER_TOTAL) # (B,), unit: W
+            tx_power_penalty = torch.mean(tx_power_excess)                       # scalar
 
             # 只供log顯示：有多少estimated channels超過總功率
             tx_power_violation_rate = torch.mean((total_tx_power > TRANSMIT_POWER_TOTAL).float())
@@ -666,9 +665,8 @@ if __name__ == "__main__":
             val_W_R_power = torch.sum(torch.abs(val_W_R_raw) ** 2,dim=(1,2)).real
             val_total_tx_power = val_W_C_power + val_W_R_power
 
-            val_total_tx_power_ratio = val_total_tx_power / TRANSMIT_POWER_TOTAL
-            val_tx_power_excess_ratio = torch.relu(val_total_tx_power_ratio - 1.0)
-            val_tx_power_penalty = torch.mean(val_tx_power_excess_ratio ** 2)
+            val_tx_power_excess = torch.relu(val_total_tx_power - TRANSMIT_POWER_TOTAL)  # (B,), unit: W
+            val_tx_power_penalty = torch.mean(val_tx_power_excess)                       # scalar
 
             val_tx_power_violation_rate = torch.mean((val_total_tx_power > TRANSMIT_POWER_TOTAL).float())
 
