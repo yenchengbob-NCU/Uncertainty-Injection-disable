@@ -171,12 +171,29 @@ if __name__ == "__main__":
     train_dataset_path  = os.path.join(DATA_DIR, "dataset_train.npz")
     val_dataset_path    = os.path.join(DATA_DIR, "dataset_val.npz")
 
-    train_dataset = theta_net.load_channel_dataset(train_dataset_path, "train")
-    val_dataset   = theta_net.load_channel_dataset(val_dataset_path, "val")
+    # 載入完整 channel datasets
+    with np.load(train_dataset_path) as data:
+        train_dataset = {key: data[key] for key in ["positions","h_dk","h_rk","G","g_dt"]}
+
+    with np.load(val_dataset_path) as data:
+        val_dataset = {key: data[key] for key in ["positions","h_dk","h_rk","G","g_dt"]}
+
+    # Dataset size
+    train_trajectories = train_dataset["h_dk"].shape[0]
+    val_trajectories   = val_dataset["h_dk"].shape[0]
+
+    train_channels = train_dataset["h_dk"].shape[1]
+    val_channels   = val_dataset["h_dk"].shape[1]
     
-    print("\n[INFO] 載入固定 datasets ...")
-    print(f"[INFO] train_dataset_path = {train_dataset_path}")
-    print(f"[INFO] val_dataset_path   = {val_dataset_path}")
+    print("\n[INFO] datasets loaded")
+    print(f"[INFO] train trajectories = {train_trajectories}")
+    print(f"[INFO] val trajectories   = {val_trajectories}")
+    print(f"[INFO] train channels     = {train_channels}")
+    print(f"[INFO] val channels       = {val_channels}")
+    print(f"[INFO] h_dk shape         = {train_dataset['h_dk'].shape}")
+    print(f"[INFO] h_rk shape         = {train_dataset['h_rk'].shape}")
+    print(f"[INFO] G shape            = {train_dataset['G'].shape}")
+    print(f"[INFO] g_dt shape         = {train_dataset['g_dt'].shape}")
 
     # ================================
     # Train RIS net only
@@ -214,10 +231,6 @@ if __name__ == "__main__":
     EARLY_STOP_EPS = 1e-6          
     PATIENCE = 30                  
 
-    # 載入資料
-    train_channels = train_dataset["h_dk_hat"].shape[0]
-    val_channels   = val_dataset["h_dk_hat"].shape[0]
-
     # 開始訓練
     for epoch in trange(REG_EPOCHS,desc="ThetaNet Pretraining"):
         
@@ -230,28 +243,56 @@ if __name__ == "__main__":
         epoch_sensing_violation_rates = []
 
         for _ in range(N_BATCHE):
-            
-            # 從data中抽出 BATCH_CHANNELS 個估計通道
-            channel_ids = np.random.choice(train_channels,size=BATCH_CHANNELS,replace=False)
+            trajectory_ids = np.random.choice(train_trajectories, size=LT_BATCH_SIZE, replace=True) # 隨機抽Batch條 trajectory         
+            channel_ids    = np.random.choice(train_channels, size=LT_BATCH_SIZE, replace=False)    # 隨機抽Batch個 channel 當開頭
 
-            h_dk_hat = torch.as_tensor(train_dataset["h_dk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            h_rk_hat = torch.as_tensor(train_dataset["h_rk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            G_hat    = torch.as_tensor(train_dataset["G_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            g_dt_hat = torch.as_tensor(train_dataset["g_dt_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
+            valid = channel_ids + LT_BLOCK_SIZE <= train_channels
+
+            trajectory_ids = trajectory_ids[valid]
+            channel_ids    = channel_ids[valid]
+
+            if len(channel_ids) == 0:
+                continue
+
+            h_dk_hat = torch.as_tensor(train_dataset["h_dk"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)
+            h_rk_hat = torch.as_tensor(train_dataset["h_rk"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)
+            G_hat    = torch.as_tensor(train_dataset["G"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)
+            g_dt_hat = torch.as_tensor(train_dataset["g_dt"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)
+
+            B = len(channel_ids)
 
             optimizer.zero_grad(set_to_none=True)   # 清除梯度，避免上一個 batch 的梯度殘留
 
-            theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
+            # start slot 產生 RIS theta
+            theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)                     # (B,N)
 
-            H_eff_H = theta_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
+            # 每個 start 對應後面 LT_BLOCK_SIZE 個 slots
+            block_ids = channel_ids[:,None] + np.arange(LT_BLOCK_SIZE)[None,:]      # (B,L)
+
+            h_dk_block = torch.as_tensor(train_dataset["h_dk"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)
+            h_rk_block = torch.as_tensor(train_dataset["h_rk"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)
+            G_block    = torch.as_tensor(train_dataset["G"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)
+            g_dt_block = torch.as_tensor(train_dataset["g_dt"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)
+
+            # (B,L,...) -> (B*L,...)
+            h_dk_block = h_dk_block.reshape(B*LT_BLOCK_SIZE,TX_ANT,UAV_COMM)
+            h_rk_block = h_rk_block.reshape(B*LT_BLOCK_SIZE,RIS_UNIT,UAV_COMM)
+            G_block    = G_block.reshape(B*LT_BLOCK_SIZE,RIS_UNIT,TX_ANT)
+            g_dt_block = g_dt_block.reshape(B*LT_BLOCK_SIZE,TX_ANT,1)
+
+            # 每個 theta 固定使用 LT_BLOCK_SIZE 個 slots
+            theta_block = theta[:,None,:].expand(-1,LT_BLOCK_SIZE,-1).reshape(B*LT_BLOCK_SIZE,RIS_UNIT)
+
+            # 計算每個 slot 的 effective channel
+            H_eff_H = theta_net.compute_effective_channel(h_dk_block,h_rk_block,G_block,theta_block)
 
             W_C_dir = make_rzf_beamformer(H_eff_H,RZF_LAMBDA)               # 這裡輸出功率正規化 W_C_dir
 
-            W_R_dir = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt_hat)           # 這裡輸出功率正規化 W_R_dir
+            W_R_dir = mrt_in_H_eff_H_nullspace(H_eff_H, g_dt_block)           # 這裡輸出功率正規化 W_R_dir
 
             W_C,W_R = beamformers_power_split(W_C_dir,W_R_dir)              # power 分配
 
-            metrics = theta_net.compute_isac_batch_performance(H_eff_H,g_dt_hat,W_C,W_R)
+            metrics = theta_net.compute_isac_batch_performance(H_eff_H,g_dt_block,W_C,W_R)
             """ 輸出結果 :
                     SINR power components:
                         signal       : (B, K)
@@ -277,14 +318,15 @@ if __name__ == "__main__":
             """
 
             # 取輸出結果
-            nominal_allUE_rate      = metrics["rate"]                               # (B,K)  所有UE在每筆估測通道的rate
-            nominal_target_snr      = metrics["target_snr"]                         # (B,)   每一筆估測通道(線性，因為要線性平均後在計算)
-            nominal_target_snr_db   = metrics["target_snr_db"]                      # (B,), dB
+            nominal_allUE_rate      = metrics["rate"].reshape(B,LT_BLOCK_SIZE,UAV_COMM)         # (B,L,K) 所有UE在每筆估測通道的rate
+            nominal_target_snr      = metrics["target_snr"].reshape(B,LT_BLOCK_SIZE)            # (B,L)   每一筆估測通道(線性，因為要線性平均後在計算)
+            nominal_target_snr_db   = metrics["target_snr_db"].reshape(B,LT_BLOCK_SIZE)         # (B,L)   dB
 
             
             # Nominal 計算
-            nominal_with_batch    = torch.min(nominal_allUE_rate, dim=1).values     # (B,)   每一筆估測通道，找出所有UE中 rate中最小的
-            nominal = torch.mean(nominal_with_batch)                                # scalar 對B筆估測通道min-rate平均
+            nominal_with_batch = torch.min(nominal_allUE_rate,dim=2).values                     # (B,L) 每個slot找出K個UE中rate最小的
+            nominal_with_block = torch.mean(nominal_with_batch,dim=1)                           # (B,)  對每個block的L個slot平均
+            nominal = torch.mean(nominal_with_block)                                            # scalar 對B個block平均
 
             # Nominal target SNR：linear mean後供epoch顯示
             nominal_target_snr_mean = torch.mean(nominal_target_snr)
@@ -292,11 +334,12 @@ if __name__ == "__main__":
             # Nominal sensing violation rate：只供log顯示
             sensing_violation_rate = torch.mean((nominal_target_snr_db < SENSING_SNR_THRESHOLD_DB).float())
 
-            # 每筆estimated channel的target SNR與4 dB門檻比較
+            # 每個slot的target SNR與門檻比較
             sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - nominal_target_snr_db)
             sensing_penalty = torch.mean(sensing_deficit_db)
+
             # loss function
-            loss = -(nominal) + REG_SENSING_LOSS_WEIGHT  * sensing_penalty
+            loss = -(nominal) + REG_SENSING_LOSS_WEIGHT * sensing_penalty
 
             loss.backward()     # 反向傳播
             optimizer.step()    # 更新NN權重
@@ -324,55 +367,71 @@ if __name__ == "__main__":
         theta_net.eval()
 
         with torch.no_grad():
-            h_dk_val = torch.as_tensor(val_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)
-            h_rk_val = torch.as_tensor(val_dataset["h_rk_hat"],dtype=torch.complex64,device=DEVICE)
-            G_val    = torch.as_tensor(val_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)
-            g_dt_val = torch.as_tensor(val_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)
+            val_channel_ids    = np.arange(0,val_channels-LT_BLOCK_SIZE+1,LT_BLOCK_SIZE)   # RIS每LT_BLOCK_SIZE個slot更新一次
+            val_trajectory_ids = np.repeat(np.arange(val_trajectories),len(val_channel_ids))
+            val_channel_ids    = np.tile(val_channel_ids,val_trajectories)
 
+            B_val = len(val_channel_ids)
 
-            theta_val = theta_net(h_dk_val,h_rk_val,G_val,g_dt_val)
+            h_dk_val = torch.as_tensor(val_dataset["h_dk"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)
+            h_rk_val = torch.as_tensor(val_dataset["h_rk"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)
+            G_val    = torch.as_tensor(val_dataset["G"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)
+            g_dt_val = torch.as_tensor(val_dataset["g_dt"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)
 
-            H_eff_val   = theta_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
+            # start slot 產生 RIS theta
+            theta_val = theta_net(h_dk_val,h_rk_val,G_val,g_dt_val)                     # (B_val,N)
+
+            # 每個 start 對應後面 LT_BLOCK_SIZE 個 slots
+            val_block_ids = val_channel_ids[:,None] + np.arange(LT_BLOCK_SIZE)[None,:]  # (B_val,L)
+
+            h_dk_val_block = torch.as_tensor(val_dataset["h_dk"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            h_rk_val_block = torch.as_tensor(val_dataset["h_rk"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            G_val_block    = torch.as_tensor(val_dataset["G"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            g_dt_val_block = torch.as_tensor(val_dataset["g_dt"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+
+            # (B_val,L,...) -> (B_val*L,...)
+            h_dk_val_block = h_dk_val_block.reshape(B_val*LT_BLOCK_SIZE,TX_ANT,UAV_COMM)
+            h_rk_val_block = h_rk_val_block.reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT,UAV_COMM)
+            G_val_block    = G_val_block.reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT,TX_ANT)
+            g_dt_val_block = g_dt_val_block.reshape(B_val*LT_BLOCK_SIZE,TX_ANT,1)
+
+            # 每個 theta 固定使用 LT_BLOCK_SIZE 個 slots
+            theta_val_block = theta_val[:,None,:].expand(-1,LT_BLOCK_SIZE,-1).reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT)
+
+            H_eff_val = theta_net.compute_effective_channel(h_dk_val_block,h_rk_val_block,G_val_block,theta_val_block)
 
             W_C_val_dir = make_rzf_beamformer(H_eff_val,RZF_LAMBDA)
-            W_R_val_dir = mrt_in_H_eff_H_nullspace(H_eff_val,g_dt_val)
+            W_R_val_dir = mrt_in_H_eff_H_nullspace(H_eff_val,g_dt_val_block)
 
-            W_C_val, W_R_val = beamformers_power_split(W_C_val_dir,W_R_val_dir)
+            W_C_val,W_R_val = beamformers_power_split(W_C_val_dir,W_R_val_dir)
 
             
-            val_metrics = theta_net.compute_isac_batch_performance(H_eff_val,g_dt_val,W_C_val,W_R_val)
+            val_metrics = theta_net.compute_isac_batch_performance(H_eff_val,g_dt_val_block,W_C_val,W_R_val)
             """ 輸出結果 :
                     SINR power components:
-                        signal       : (B, K)
-                        comm_interf  : (B, K)
-                        radar_interf : (B, K)
+                        signal       : (B_val*L, K)
+                        comm_interf  : (B_val*L, K)
+                        radar_interf : (B_val*L, K)
                         noise        : scalar
 
                     raw per-channel-sample tensors:
-                        sinr          : (B, K), linear
-                        sinr_db       : (B, K), dB
-                        rate          : (B, K)
-                        sumrate       : (B,)
-                        target_snr    : (B,), linear
-                        target_snr_db : (B,), dB
-
-                    B-average display values: 對所有channel 平均
-                        sinr_user_mean      : (K,), linear
-                        sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
-                        rate_user_mean      : (K,)
-                        sumrate_mean        : scalar
-                        target_snr_mean     : scalar, linear
-                        target_snr_mean_db  : scalar, dB = 10log10(mean linear target SNR)
+                        sinr          : (B_val*L, K), linear
+                        sinr_db       : (B_val*L, K), dB
+                        rate          : (B_val*L, K)
+                        sumrate       : (B_val*L,)
+                        target_snr    : (B_val*L,), linear
+                        target_snr_db : (B_val*L,), dB
             """
     
             # 取輸出結果
-            val_nominal_allUE_rate      = val_metrics["rate"]                            # (B,K) 所有UE在每筆估測通道的rate
-            val_nominal_target_snr      = val_metrics["target_snr"]                      # (B,) 每一筆估測通道的target SNR，linear
-            val_nominal_target_snr_db   = val_metrics["target_snr_db"]                   # (B,), dB
+            val_nominal_allUE_rate    = val_metrics["rate"].reshape(B_val,LT_BLOCK_SIZE,UAV_COMM)         # (B_val,L,K) 所有UE在每個slot的rate
+            val_nominal_target_snr    = val_metrics["target_snr"].reshape(B_val,LT_BLOCK_SIZE)            # (B_val,L) 每個slot的target SNR，linear
+            val_nominal_target_snr_db = val_metrics["target_snr_db"].reshape(B_val,LT_BLOCK_SIZE)         # (B_val,L) dB
 
             # Nominal計算
-            val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=1).values     # (B,) 每一筆估測通道找出所有UE中rate最小的
-            val_nominal = torch.mean(val_nominal_with_batch)                            # scalar 對B筆估測通道min-rate平均
+            val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=2).values       # (B_val,L) 每個slot找出所有UE中rate最小的
+            val_nominal_with_block = torch.mean(val_nominal_with_batch,dim=1)             # (B_val,) 對每個block的L個slot平均
+            val_nominal = torch.mean(val_nominal_with_block)                              # scalar 對全部validation block平均
 
             # Nominal target SNR：linear mean後轉dB
             val_nominal_target_snr_mean = torch.mean(val_nominal_target_snr)
@@ -381,7 +440,7 @@ if __name__ == "__main__":
             # Nominal sensing violation rate：只供log顯示
             val_sensing_violation_rate = torch.mean((val_nominal_target_snr_db < SENSING_SNR_THRESHOLD_DB).float())
 
-            # 每筆estimated channel的target SNR與4 dB門檻比較
+            # 每個slot的target SNR與門檻比較
             val_sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - val_nominal_target_snr_db)
             val_sensing_penalty = torch.mean(val_sensing_deficit_db)
 

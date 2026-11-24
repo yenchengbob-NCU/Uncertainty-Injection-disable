@@ -284,7 +284,7 @@ def plot_reg_curves(reg_curve_path, reg_curve_dir, ma_window=20):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Train two-timescale REG networks.")
-    parser.add_argument("--pretrain",action="store_true",help="Load the pretrained NS-MRT RadarNet checkpoint.")
+    parser.add_argument("--pretrain",action="store_true",help="Load pretrained RZF CommNet and NS-MRT RadarNet checkpoints.")
     args = parser.parse_args()
 
     comm_net  = CommNet().to(DEVICE)
@@ -295,8 +295,11 @@ if __name__ == "__main__":
     train_dataset_path  = os.path.join(DATA_DIR, "dataset_train.npz")
     val_dataset_path    = os.path.join(DATA_DIR, "dataset_val.npz")
 
-    train_dataset = comm_net.load_channel_dataset(train_dataset_path,"train")
-    val_dataset   = comm_net.load_channel_dataset(val_dataset_path,"val")
+    with np.load(train_dataset_path) as data:
+        train_dataset = {key: data[key] for key in ["positions","h_dk","h_rk","G","g_dt"]}
+
+    with np.load(val_dataset_path) as data:
+        val_dataset = {key: data[key] for key in ["positions","h_dk","h_rk","G","g_dt"]}
 
     print("\n[INFO] 載入固定 datasets ...")
     print(f"[INFO] train_dataset_path = {train_dataset_path}")
@@ -313,6 +316,7 @@ if __name__ == "__main__":
     reg_curve_dir  = os.path.join(REG_CKPT_DIR, "two_timescale_reg_curves")
     # 已經訓練的RIS ckpt 路徑
     ris_only_ckpt  = os.path.join(PRETRAIN_DIR, "ris_only.ckpt")
+    comm_pretrain_ckpt = os.path.join(PRETRAIN_DIR,"comm_rzf_pretrain.ckpt")
     radar_pretrain_ckpt = os.path.join(PRETRAIN_DIR,"radar_ns_mrt_pretrain.ckpt")
 
     os.makedirs(reg_curve_dir, exist_ok=True)
@@ -321,7 +325,7 @@ if __name__ == "__main__":
         "train_loss": [],               # Loss function 看收斂
         "val_loss": [],
 
-        "train_nominal": [],            # Nominal ≜ 先找出K個UE中 worst UE rate,再對B channel平均
+        "train_nominal": [],            # Nominal ≜ 每slot先找K個UE中 worst UE rate,再對L slots與B blocks平均
         "val_nominal": [],
 
         "train_target_snr_db": [],      # 感測SNR 不畫圖
@@ -376,8 +380,13 @@ if __name__ == "__main__":
     PATIENCE = 30                  
 
     # 載入資料
-    train_channels = train_dataset["h_dk_hat"].shape[0]
-    val_channels   = val_dataset["h_dk_hat"].shape[0]
+    train_trajectories, train_channels = train_dataset["h_dk"].shape[:2]
+    val_trajectories, val_channels     = val_dataset["h_dk"].shape[:2]
+
+    val_channel_ids = np.arange(0,val_channels-LT_BLOCK_SIZE+1,LT_BLOCK_SIZE)
+    val_trajectory_ids = np.repeat(np.arange(val_trajectories),len(val_channel_ids))
+    val_channel_ids = np.tile(val_channel_ids,val_trajectories)
+    B_val = len(val_channel_ids)
 
     print("\n" + "=" * 90)
     print("[TWO TIMESCALE REG TRAIN]")
@@ -386,7 +395,7 @@ if __name__ == "__main__":
     print(f"Val channels            : {val_channels}")
     print(f"REG_EPOCHS              : {REG_EPOCHS}")
     print(f"N_BATCHE                : {N_BATCHE}")
-    print(f"BATCH_CHANNELS          : {BATCH_CHANNELS}")
+    print(f"ST_BATCH_SIZE          : {ST_BATCH_SIZE}")
     print(f"REG learning rate       : {REG_LEARNING_RATE}")
     print(f"Sensing SNR threshold   : {SENSING_SNR_THRESHOLD_DB} dB")
     print(f"Sensing penalty weight  : {REG_SENSING_LOSS_WEIGHT}")
@@ -404,35 +413,53 @@ if __name__ == "__main__":
 
 
     # ================================
-    # RadarNet initialization
+    # CommNet / RadarNet initialization
     # ================================
     if args.pretrain:
+        # CommNet不載入RZF預訓練，保留random initialization
+        comm_init_mode = "Random initialization"
+
         if not os.path.exists(radar_pretrain_ckpt):
             raise FileNotFoundError(f"找不到 RadarNet pretrain checkpoint: {radar_pretrain_ckpt}")
 
         radar_net.load_model(radar_pretrain_ckpt,strict=True,verbose=True)
         radar_init_mode = "NS-MRT pretrained"
 
+        print("[INFO] CommNet uses random initialization.")
         print(f"[INFO] Loaded RadarNet pretrain checkpoint: {radar_pretrain_ckpt}")
 
     else:
-        # 不載入checkpoint，保留RadarNet建立時的隨機初始化權重
+        comm_init_mode  = "Random initialization"
         radar_init_mode = "Random initialization"
 
+        print("[INFO] CommNet uses random initialization.")
         print("[INFO] RadarNet uses random initialization.")
 
 
-    # 不論是否載入預訓練權重，正式REG訓練都會更新RadarNet
+    for parameter in comm_net.parameters():
+        parameter.requires_grad_(True)
+
     for parameter in radar_net.parameters():
         parameter.requires_grad_(True)
 
 
-    # CommNet固定隨機初始化
-    # RadarNet由--pretrain決定預訓練或隨機初始化
-    optimizer = optim.Adam(list(comm_net.parameters()) + list(radar_net.parameters()),lr=REG_LEARNING_RATE)
+    optimizer = optim.Adam(
+        list(comm_net.parameters()) + list(radar_net.parameters()),
+        lr=REG_LEARNING_RATE,
+    )
 
+    print(f"[INFO] CommNet initialization mode : {comm_init_mode}")
     print(f"[INFO] RadarNet initialization mode: {radar_init_mode}")
     print("[INFO] CommNet and RadarNet remain trainable during REG joint training.")
+
+
+    COMM_INIT_TARGET_POWER = TRANSMIT_POWER_TOTAL / 2.0   # 0.63 W
+    comm_init_power_scaled = False
+
+
+
+
+
 
     # 開始訓練
     for epoch in trange(REG_EPOCHS, desc="REG Training"):
@@ -456,27 +483,80 @@ if __name__ == "__main__":
         epoch_tx_power_penalties = []
         epoch_tx_power_violation_rates = []
 
-        # 一個epoch 有 N_BATCHE 個 batch , 一個 batch 有BATCH_CHANNELS個估測通道
+        # 一個epoch 有 N_BATCHE 個 batch , 一個 batch 有ST_BATCH_SIZE個 long-term blocks
         for _ in range(N_BATCHE):
-            # 從data中抽出 BATCH_CHANNELS 個估計通道
-            channel_ids = np.random.choice(train_channels,size=BATCH_CHANNELS,replace=False)
-            
-            h_dk_hat = torch.as_tensor(train_dataset["h_dk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, M, K)
-            h_rk_hat = torch.as_tensor(train_dataset["h_rk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, N, K)
-            G_hat    = torch.as_tensor(train_dataset["G_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)     # (B, N, M)
-            g_dt_hat = torch.as_tensor(train_dataset["g_dt_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, M, 1)
+            # 從data中抽出 ST_BATCH_SIZE 個 long-term blocks
+            trajectory_ids = np.random.choice(train_trajectories,size=ST_BATCH_SIZE,replace=True)
+            channel_ids = np.random.choice(train_channels,size=ST_BATCH_SIZE,replace=False)
+
+            valid = channel_ids + LT_BLOCK_SIZE <= train_channels
+            trajectory_ids = trajectory_ids[valid]
+            channel_ids = channel_ids[valid]
+            B = len(channel_ids)
+
+            # ThetaNet只看每個long-term block的start-slot CSI
+            h_dk_hat = torch.as_tensor(train_dataset["h_dk"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, M, K)
+            h_rk_hat = torch.as_tensor(train_dataset["h_rk"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, N, K)
+            G_hat    = torch.as_tensor(train_dataset["G"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)     # (B, N, M)
+            g_dt_hat = torch.as_tensor(train_dataset["g_dt"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)  # (B, M, 1)
+
+            block_ids = channel_ids[:,None] + np.arange(LT_BLOCK_SIZE)[None,:]  # (B,L)
+
+            h_dk_block = torch.as_tensor(train_dataset["h_dk"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)  # (B,L,M,K)
+            h_rk_block = torch.as_tensor(train_dataset["h_rk"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)  # (B,L,N,K)
+            G_block    = torch.as_tensor(train_dataset["G"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)     # (B,L,N,M)
+            g_dt_block = torch.as_tensor(train_dataset["g_dt"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)  # (B,L,M,1)
+
+            h_dk_block = h_dk_block.reshape(B*LT_BLOCK_SIZE,TX_ANT,UAV_COMM)
+            h_rk_block = h_rk_block.reshape(B*LT_BLOCK_SIZE,RIS_UNIT,UAV_COMM)
+            G_block    = G_block.reshape(B*LT_BLOCK_SIZE,RIS_UNIT,TX_ANT)
+            g_dt_block = g_dt_block.reshape(B*LT_BLOCK_SIZE,TX_ANT,1)
 
             optimizer.zero_grad(set_to_none=True)   # 清除梯度，避免上一個 batch 的梯度殘留
 
             # 使用已經訓練的RIS net 拿到theta
             with torch.no_grad():
-                theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
-                # 計算出等效通道
-                H_eff_H = comm_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
-            
+                theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)               # (B,N)
+                theta_block = theta[:,None,:].expand(-1,LT_BLOCK_SIZE,-1).reshape(B*LT_BLOCK_SIZE,RIS_UNIT)
+                # 每個slot使用自己的channel計算等效通道，固定的只有theta
+                H_eff_H = comm_net.compute_effective_channel(h_dk_block,h_rk_block,G_block,theta_block)
+
             # NN直接輸出beamformer，包含方向與功率分配
-            W_C_raw = comm_net(H_eff_H,g_dt_hat)
-            W_R_raw = radar_net(H_eff_H,g_dt_hat)
+            W_C_raw = comm_net(H_eff_H,g_dt_block)
+            # --pretrain模式下，CommNet不載入teacher，只在joint training第一次forward時
+            # 將random CommNet的平均初始輸出power校準至P_T/2，之後不再限制其power
+            if args.pretrain and not comm_init_power_scaled:
+
+                with torch.no_grad():
+                    comm_init_power_before = torch.mean(
+                        torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2)).real
+                    )
+
+                    comm_init_scale = torch.sqrt(
+                        torch.tensor(COMM_INIT_TARGET_POWER,dtype=torch.float32,device=DEVICE)
+                        / comm_init_power_before.clamp_min(1e-12)
+                    )
+
+                    comm_net.fc_out_real.weight.mul_(comm_init_scale)
+                    comm_net.fc_out_real.bias.mul_(comm_init_scale)
+                    comm_net.fc_out_imag.weight.mul_(comm_init_scale)
+                    comm_net.fc_out_imag.bias.mul_(comm_init_scale)
+
+                # output layer已改變，因此重新forward一次
+                W_C_raw = comm_net(H_eff_H,g_dt_block)
+
+                comm_init_power_after = torch.mean(
+                    torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2)).real
+                )
+
+                print(
+                    f"\n[INFO] CommNet one-time initial power calibration: "
+                    f"{comm_init_power_before.item():.6f} W -> "
+                    f"{comm_init_power_after.item():.6f} W"
+                )
+
+                comm_init_power_scaled = True
+            W_R_raw = radar_net(H_eff_H,g_dt_block)
 
             # 每一筆estimated channel的beamformer power
             W_C_power = torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2)).real
@@ -491,23 +571,23 @@ if __name__ == "__main__":
             # 只供log顯示：有多少channel超過總傳輸功率
             tx_power_violation_rate = torch.mean((total_tx_power > TRANSMIT_POWER_TOTAL).float())
 
-            metrics = comm_net.compute_isac_batch_performance(H_eff_H,g_dt_hat,W_C_raw,W_R_raw)
+            metrics = comm_net.compute_isac_batch_performance(H_eff_H,g_dt_block,W_C_raw,W_R_raw)
             """ 輸出結果 :
                     SINR power components:
-                        signal       : (B, K)
-                        comm_interf  : (B, K)
-                        radar_interf : (B, K)
+                        signal       : (B*L, K)
+                        comm_interf  : (B*L, K)
+                        radar_interf : (B*L, K)
                         noise        : scalar
 
                     raw per-channel-sample tensors:
-                        sinr          : (B, K), linear
-                        sinr_db       : (B, K), dB
-                        rate          : (B, K)
-                        sumrate       : (B,)
-                        target_snr    : (B,), linear
-                        target_snr_db : (B,), dB
+                        sinr          : (B*L, K), linear
+                        sinr_db       : (B*L, K), dB
+                        rate          : (B*L, K)
+                        sumrate       : (B*L,)
+                        target_snr    : (B*L,), linear
+                        target_snr_db : (B*L,), dB
 
-                    B-average display values: 對所有channel 平均
+                    B*L-average display values: 對所有short-term slots 平均
                         sinr_user_mean      : (K,), linear
                         sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
                         rate_user_mean      : (K,)
@@ -517,18 +597,19 @@ if __name__ == "__main__":
             """
 
             # 取輸出結果
-            nominal_allUE_rate      = metrics["rate"]                               # (B,K)  所有UE在每筆估測通道的rate
-            nominal_target_snr      = metrics["target_snr"]                         # (B,)   每一筆估測通道(線性，因為要線性平均後在計算)
-            nominal_target_snr_db   = metrics["target_snr_db"]                      # (B,), dB
+            nominal_allUE_rate      = metrics["rate"].reshape(B,LT_BLOCK_SIZE,UAV_COMM)    # (B,L,K)
+            nominal_target_snr      = metrics["target_snr"].reshape(B,LT_BLOCK_SIZE)        # (B,L), linear
+            nominal_target_snr_db   = metrics["target_snr_db"].reshape(B,LT_BLOCK_SIZE)     # (B,L), dB
 
-            nominal_signal          = metrics["signal"]                             # (B,K)  各UE的signal power
-            nominal_comm_interf     = metrics["comm_interf"]                        # (B,K)  
-            nominal_radar_interf    = metrics["radar_interf"]                       # (B,K)
+            nominal_signal          = metrics["signal"]                             # (B*L,K)  各UE的signal power
+            nominal_comm_interf     = metrics["comm_interf"]                        # (B*L,K)
+            nominal_radar_interf    = metrics["radar_interf"]                       # (B*L,K)
             nominal_noise           = metrics["noise"]                              # scalar
 
             # Nominal 計算
-            nominal_with_batch    = torch.min(nominal_allUE_rate, dim=1).values     # (B,)   每一筆估測通道，找出所有UE中 rate中最小的
-            nominal = torch.mean(nominal_with_batch)                                # scalar 對B筆估測通道min-rate平均
+            nominal_with_batch = torch.min(nominal_allUE_rate,dim=2).values          # (B,L) 每個slot找出K個UE中rate最小的
+            nominal_with_block = torch.mean(nominal_with_batch,dim=1)                # (B,) 對每個block的L slots平均
+            nominal = torch.mean(nominal_with_block)                                 # scalar 對B個long-term blocks平均
 
             # SINR組成 
             signal_power         = torch.mean(nominal_signal,dim=0)                 #(K,)
@@ -541,12 +622,12 @@ if __name__ == "__main__":
             # Nominal sensing violation rate：只供log顯示
             sensing_violation_rate  = torch.mean((nominal_target_snr_db < SENSING_SNR_THRESHOLD_DB).float())
 
-            # 每一筆 estimated channel 的 nominal target SNR 都與 4 dB 門檻比較
-            sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - nominal_target_snr_db)   # (B,)
+            # 每一個 short-term slot 的 nominal target SNR 都與 4 dB 門檻比較
+            sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - nominal_target_snr_db)   # (B,L)
             sensing_penalty = torch.mean(sensing_deficit_db)                                    # scalar
 
             # loss function
-            loss = -nominal + REG_SENSING_LOSS_WEIGHT * sensing_penalty + TX_POWER_LOSS_WEIGHT * tx_power_penalty
+            loss = -nominal + REG_SENSING_LOSS_WEIGHT * sensing_penalty + REG_TX_POWER_LOSS_WEIGHT * tx_power_penalty
 
             loss.backward()     # 反向傳播
             optimizer.step()    # 更新NN權重
@@ -592,24 +673,38 @@ if __name__ == "__main__":
         }
 
         # ================================
-        # Validation: 固定 layout 的全部 val channels
+        # Validation: 固定 0,L,2L,... block starts 的全部 val trajectories
         # ================================
         comm_net.eval()
         radar_net.eval()
 
         with torch.no_grad():
-            h_dk_val = torch.as_tensor(val_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)
-            h_rk_val = torch.as_tensor(val_dataset["h_rk_hat"],dtype=torch.complex64,device=DEVICE)
-            G_val    = torch.as_tensor(val_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)
-            g_dt_val = torch.as_tensor(val_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)
+            # ThetaNet只看每個validation long-term block的start-slot CSI
+            h_dk_val = torch.as_tensor(val_dataset["h_dk"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)  # (B_val,M,K)
+            h_rk_val = torch.as_tensor(val_dataset["h_rk"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)  # (B_val,N,K)
+            G_val    = torch.as_tensor(val_dataset["G"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)     # (B_val,N,M)
+            g_dt_val = torch.as_tensor(val_dataset["g_dt"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)  # (B_val,M,1)
 
-            # 輸入固定的theta網路
-            theta_val   = theta_net(h_dk_val,h_rk_val,G_val,g_dt_val)
-            # 計算出等效通道
-            H_eff_val   = comm_net.compute_effective_channel(h_dk_val,h_rk_val,G_val,theta_val)
+            theta_val = theta_net(h_dk_val,h_rk_val,G_val,g_dt_val)  # (B_val,N)
 
-            W_C_val_raw = comm_net(H_eff_val,g_dt_val)
-            W_R_val_raw = radar_net(H_eff_val,g_dt_val)
+            val_block_ids = val_channel_ids[:,None] + np.arange(LT_BLOCK_SIZE)[None,:]  # (B_val,L)
+
+            h_dk_val_block = torch.as_tensor(val_dataset["h_dk"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            h_rk_val_block = torch.as_tensor(val_dataset["h_rk"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            G_val_block    = torch.as_tensor(val_dataset["G"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            g_dt_val_block = torch.as_tensor(val_dataset["g_dt"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+
+            h_dk_val_block = h_dk_val_block.reshape(B_val*LT_BLOCK_SIZE,TX_ANT,UAV_COMM)
+            h_rk_val_block = h_rk_val_block.reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT,UAV_COMM)
+            G_val_block    = G_val_block.reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT,TX_ANT)
+            g_dt_val_block = g_dt_val_block.reshape(B_val*LT_BLOCK_SIZE,TX_ANT,1)
+            theta_val_block = theta_val[:,None,:].expand(-1,LT_BLOCK_SIZE,-1).reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT)
+
+            # 每個slot使用自己的channel計算等效通道，固定的只有theta
+            H_eff_val = comm_net.compute_effective_channel(h_dk_val_block,h_rk_val_block,G_val_block,theta_val_block)
+
+            W_C_val_raw = comm_net(H_eff_val,g_dt_val_block)
+            W_R_val_raw = radar_net(H_eff_val,g_dt_val_block)
 
             val_W_C_power = torch.sum(torch.abs(W_C_val_raw) ** 2,dim=(1,2)).real
             val_W_R_power = torch.sum(torch.abs(W_R_val_raw) ** 2,dim=(1,2)).real
@@ -621,23 +716,23 @@ if __name__ == "__main__":
 
             val_tx_power_violation_rate = torch.mean((val_total_tx_power > TRANSMIT_POWER_TOTAL).float())
 
-            val_metrics = comm_net.compute_isac_batch_performance(H_eff_val,g_dt_val,W_C_val_raw,W_R_val_raw)
+            val_metrics = comm_net.compute_isac_batch_performance(H_eff_val,g_dt_val_block,W_C_val_raw,W_R_val_raw)
             """ 輸出結果 :
                     SINR power components:
-                        signal       : (B, K)
-                        comm_interf  : (B, K)
-                        radar_interf : (B, K)
+                        signal       : (B_val*L, K)
+                        comm_interf  : (B_val*L, K)
+                        radar_interf : (B_val*L, K)
                         noise        : scalar
 
                     raw per-channel-sample tensors:
-                        sinr          : (B, K), linear
-                        sinr_db       : (B, K), dB
-                        rate          : (B, K)
-                        sumrate       : (B,)
-                        target_snr    : (B,), linear
-                        target_snr_db : (B,), dB
+                        sinr          : (B_val*L, K), linear
+                        sinr_db       : (B_val*L, K), dB
+                        rate          : (B_val*L, K)
+                        sumrate       : (B_val*L,)
+                        target_snr    : (B_val*L,), linear
+                        target_snr_db : (B_val*L,), dB
 
-                    B-average display values: 對所有channel 平均
+                    B_val*L-average display values: 對所有validation short-term slots 平均
                         sinr_user_mean      : (K,), linear
                         sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
                         rate_user_mean      : (K,)
@@ -647,18 +742,19 @@ if __name__ == "__main__":
             """
 
             # 取輸出結果
-            val_nominal_allUE_rate      = val_metrics["rate"]                            # (B,K) 所有UE在每筆估測通道的rate
-            val_nominal_target_snr      = val_metrics["target_snr"]                      # (B,) 每一筆估測通道的target SNR，linear
-            val_nominal_target_snr_db   = val_metrics["target_snr_db"]                   # (B,), dB
+            val_nominal_allUE_rate      = val_metrics["rate"].reshape(B_val,LT_BLOCK_SIZE,UAV_COMM)  # (B_val,L,K)
+            val_nominal_target_snr      = val_metrics["target_snr"].reshape(B_val,LT_BLOCK_SIZE)      # (B_val,L), linear
+            val_nominal_target_snr_db   = val_metrics["target_snr_db"].reshape(B_val,LT_BLOCK_SIZE)   # (B_val,L), dB
 
-            val_nominal_signal          = val_metrics["signal"]                          # (B,K) 各UE的signal power
-            val_nominal_comm_interf     = val_metrics["comm_interf"]                     # (B,K)
-            val_nominal_radar_interf    = val_metrics["radar_interf"]                    # (B,K)
+            val_nominal_signal          = val_metrics["signal"]                          # (B_val*L,K) 各UE的signal power
+            val_nominal_comm_interf     = val_metrics["comm_interf"]                     # (B_val*L,K)
+            val_nominal_radar_interf    = val_metrics["radar_interf"]                    # (B_val*L,K)
             val_nominal_noise           = val_metrics["noise"]                           # scalar
 
             # Nominal計算
-            val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=1).values     # (B,) 每一筆估測通道找出所有UE中rate最小的
-            val_nominal = torch.mean(val_nominal_with_batch)                            # scalar 對B筆估測通道min-rate平均
+            val_nominal_with_batch = torch.min(val_nominal_allUE_rate,dim=2).values      # (B_val,L) 每個slot找出K個UE中rate最小的
+            val_nominal_with_block = torch.mean(val_nominal_with_batch,dim=1)            # (B_val,) 對每個block的L slots平均
+            val_nominal = torch.mean(val_nominal_with_block)                             # scalar 對全部validation long-term blocks平均
 
             # SINR組成
             val_signal_power = torch.mean(val_nominal_signal,dim=0)                     # (K,)
@@ -672,12 +768,12 @@ if __name__ == "__main__":
             # Nominal sensing violation rate：只供log顯示
             val_sensing_violation_rate = torch.mean((val_nominal_target_snr_db < SENSING_SNR_THRESHOLD_DB).float())
 
-            # 每一筆 estimated channel 的 nominal target SNR 與4 dB門檻比較
+            # 每一個 validation short-term slot 的 nominal target SNR 與4 dB門檻比較
             val_sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - val_nominal_target_snr_db)
             val_sensing_penalty = torch.mean(val_sensing_deficit_db)
 
             # Loss function
-            val_loss = -val_nominal + REG_SENSING_LOSS_WEIGHT * val_sensing_penalty + TX_POWER_LOSS_WEIGHT * val_tx_power_penalty
+            val_loss = -val_nominal + REG_SENSING_LOSS_WEIGHT * val_sensing_penalty + REG_TX_POWER_LOSS_WEIGHT * val_tx_power_penalty
 
         val_logs = {
             "loss": float(val_loss.detach().cpu()),
@@ -821,7 +917,7 @@ if __name__ == "__main__":
     print(f"Val channels            : {val_channels}")
     print(f"REG_EPOCHS              : {REG_EPOCHS}")
     print(f"N_BATCHE                : {N_BATCHE}")
-    print(f"BATCH_CHANNELS          : {BATCH_CHANNELS}")
+    print(f"ST_BATCH_SIZE          : {ST_BATCH_SIZE}")
     print(f"REG learning rate       : {REG_LEARNING_RATE}")
     print(f"Sensing SNR threshold   : {SENSING_SNR_THRESHOLD_DB} dB")
     print(f"Sensing penalty weight  : {REG_SENSING_LOSS_WEIGHT}")

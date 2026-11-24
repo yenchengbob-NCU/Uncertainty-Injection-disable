@@ -283,8 +283,11 @@ if __name__ == "__main__":
     train_dataset_path  = os.path.join(DATA_DIR, "dataset_train.npz")
     val_dataset_path    = os.path.join(DATA_DIR, "dataset_val.npz")
 
-    train_dataset = comm_net.load_channel_dataset(train_dataset_path,"train")
-    val_dataset = comm_net.load_channel_dataset(val_dataset_path,"val")
+    with np.load(train_dataset_path) as data:
+        train_dataset = {key: data[key] for key in ["positions","h_dk","h_rk","G","g_dt"]}
+
+    with np.load(val_dataset_path) as data:
+        val_dataset = {key: data[key] for key in ["positions","h_dk","h_rk","G","g_dt"]}
     
     print("\n[INFO] 載入固定 datasets ...")
     print(f"[INFO] train_dataset_path = {train_dataset_path}")
@@ -308,7 +311,7 @@ if __name__ == "__main__":
         "train_loss": [],               # Loss function 看收斂
         "val_loss": [],
 
-        "train_robust": [],             # Robust ≜ 先找出K個UE中 worst UE rate,再對S取Q0.05,最後對B channel平均
+        "train_robust": [],             # Robust ≜ 每slot先找K個UE中 worst UE rate,再對S取Q0.05,最後對L slots與B blocks平均
         "val_robust": [],
 
         "train_target_snr_db": [],      # 感測SNR 不畫圖
@@ -352,13 +355,19 @@ if __name__ == "__main__":
     best_valtarget_snr_db = 0.0
     best_val_epoch = 0                  # best loss 出現在哪個 epoch
 
-    patience_counter = 0           
-    EARLY_STOP_EPS = 1e-6          
-    PATIENCE = 30                  
+    patience_counter    = 0           
+    EARLY_STOP_EPS      = 1e-6          
+    PATIENCE            = 30
+    VAL_CHUNK_SIZE      = 250           # validation 每次處理的long-term blocks數量，避免一次建立全部injection tensors                 
 
     # 載入資料
-    train_channels = train_dataset["h_dk_hat"].shape[0]
-    val_channels   = val_dataset["h_dk_hat"].shape[0]
+    train_trajectories, train_channels = train_dataset["h_dk"].shape[:2]
+    val_trajectories, val_channels     = val_dataset["h_dk"].shape[:2]
+
+    val_channel_ids = np.arange(0,val_channels-LT_BLOCK_SIZE+1,LT_BLOCK_SIZE)
+    val_trajectory_ids = np.repeat(np.arange(val_trajectories),len(val_channel_ids))
+    val_channel_ids = np.tile(val_channel_ids,val_trajectories)
+    B_val = len(val_channel_ids)
 
     print("\n" + "=" * 90)
     print("[TWO TIMESCALE ROB TRAIN]")
@@ -367,7 +376,7 @@ if __name__ == "__main__":
     print(f"Val channels            : {val_channels}")
     print(f"ROB_EPOCHS              : {ROB_EPOCHS}")
     print(f"N_BATCHE                : {N_BATCHE}")
-    print(f"BATCH_CHANNELS          : {BATCH_CHANNELS}")
+    print(f"ST_BATCH_SIZE          : {ST_BATCH_SIZE}")
     print(f"ROB learning rate       : {ROB_LEARNING_RATE}")
     print(f"RadarNet initialization : {'NS-MRT pretrained' if args.pretrain else 'Random'}")
     print(f"Sensing SNR threshold   : {SENSING_SNR_THRESHOLD_DB} dB")
@@ -441,100 +450,119 @@ if __name__ == "__main__":
         epoch_tx_power_penalties = []
         epoch_tx_power_violation_rates = []
 
-        # 一個epoch 有 N_BATCHE 個 batch , 一個 batch 有BATCH_CHANNELS個估測通道
-        # 一個估測通道有S個 sample
+        # 一個epoch 有 N_BATCHE 個 batch , 一個 batch 有BATCH_CHANNELS個 long-term blocks
+        # 一個 short-term slot 有S個 injection samples
         for _ in range(N_BATCHE):
             
-            # 從data中抽出 BATCH_CHANNELS 個估計通道
-            channel_ids = np.random.choice(train_channels,size=BATCH_CHANNELS,replace=False)
+            # 從data中抽出 ST_BATCH_SIZE 個 long-term blocks
+            trajectory_ids = np.random.choice(train_trajectories,size=ST_BATCH_SIZE,replace=True)
+            channel_ids = np.random.choice(train_channels,size=ST_BATCH_SIZE,replace=False)
 
-            h_dk_hat = torch.as_tensor(train_dataset["h_dk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            h_rk_hat = torch.as_tensor(train_dataset["h_rk_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            G_hat    = torch.as_tensor(train_dataset["G_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
-            g_dt_hat = torch.as_tensor(train_dataset["g_dt_hat"][channel_ids],dtype=torch.complex64,device=DEVICE)
+            valid = channel_ids + LT_BLOCK_SIZE <= train_channels
+            trajectory_ids = trajectory_ids[valid]
+            channel_ids = channel_ids[valid]
+            B = len(channel_ids)
+
+            # ThetaNet只看每個long-term block的start-slot CSI
+            h_dk_hat = torch.as_tensor(train_dataset["h_dk"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)  # (B,M,K)
+            h_rk_hat = torch.as_tensor(train_dataset["h_rk"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)  # (B,N,K)
+            G_hat    = torch.as_tensor(train_dataset["G"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)     # (B,N,M)
+            g_dt_hat = torch.as_tensor(train_dataset["g_dt"][trajectory_ids,channel_ids],dtype=torch.complex64,device=DEVICE)  # (B,M,1)
+
+            block_ids = channel_ids[:,None] + np.arange(LT_BLOCK_SIZE)[None,:]  # (B,L)
+
+            h_dk_block = torch.as_tensor(train_dataset["h_dk"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)  # (B,L,M,K)
+            h_rk_block = torch.as_tensor(train_dataset["h_rk"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)  # (B,L,N,K)
+            G_block    = torch.as_tensor(train_dataset["G"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)     # (B,L,N,M)
+            g_dt_block = torch.as_tensor(train_dataset["g_dt"][trajectory_ids[:,None],block_ids],dtype=torch.complex64,device=DEVICE)  # (B,L,M,1)
+
+            h_dk_block = h_dk_block.reshape(B*LT_BLOCK_SIZE,TX_ANT,UAV_COMM)
+            h_rk_block = h_rk_block.reshape(B*LT_BLOCK_SIZE,RIS_UNIT,UAV_COMM)
+            G_block    = G_block.reshape(B*LT_BLOCK_SIZE,RIS_UNIT,TX_ANT)
+            g_dt_block = g_dt_block.reshape(B*LT_BLOCK_SIZE,TX_ANT,1)
 
             optimizer.zero_grad(set_to_none=True)   # 清除梯度，避免上一個 batch 的梯度殘留
 
             # 使用已經訓練的RIS net 拿到theta
             with torch.no_grad():
-                theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)
-                # 計算出等效通道
-                H_eff_H = comm_net.compute_effective_channel(h_dk_hat,h_rk_hat,G_hat,theta)
+                theta = theta_net(h_dk_hat,h_rk_hat,G_hat,g_dt_hat)               # (B,N)
+                theta_block = theta[:,None,:].expand(-1,LT_BLOCK_SIZE,-1).reshape(B*LT_BLOCK_SIZE,RIS_UNIT)
+                # 每個slot使用自己的channel計算等效通道，固定的只有theta
+                H_eff_H = comm_net.compute_effective_channel(h_dk_block,h_rk_block,G_block,theta_block)
 
             # NN直接輸出beamformer，同時學習方向與power allocation
-            W_C_raw = comm_net(H_eff_H,g_dt_hat)
-            W_R_raw = radar_net(H_eff_H,g_dt_hat)
+            W_C_raw = comm_net(H_eff_H,g_dt_block)
+            W_R_raw = radar_net(H_eff_H,g_dt_block)
 
-            # 每筆estimated channel對應的communication與sensing power
-            W_C_power = torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2)).real       # (B,)
-            W_R_power = torch.sum(torch.abs(W_R_raw) ** 2,dim=(1,2)).real       # (B,)
-            total_tx_power = W_C_power + W_R_power                              # (B,)
+            # 每個short-term slot對應的communication與sensing power
+            W_C_power = torch.sum(torch.abs(W_C_raw) ** 2,dim=(1,2)).real       # (B*L,)
+            W_R_power = torch.sum(torch.abs(W_R_raw) ** 2,dim=(1,2)).real       # (B*L,)
+            total_tx_power = W_C_power + W_R_power                              # (B*L,)
 
-            # 每筆estimated channel都必須滿足 P_C + P_R <= TRANSMIT_POWER_TOTAL
-            tx_power_excess  = torch.relu(total_tx_power - TRANSMIT_POWER_TOTAL) # (B,), unit: W
-            tx_power_penalty = torch.mean(tx_power_excess)                       # scalar
+            # 每個short-term slot都必須滿足 P_C + P_R <= TRANSMIT_POWER_TOTAL
+            total_tx_power_ratio = total_tx_power / TRANSMIT_POWER_TOTAL
+            tx_power_excess_ratio = torch.relu(total_tx_power_ratio - 1.0)
+            tx_power_penalty = torch.mean(tx_power_excess_ratio ** 2                )# scalar
 
-            # 只供log顯示：有多少estimated channels超過總功率
+            # 只供log顯示：有多少short-term slots超過總功率
             tx_power_violation_rate = torch.mean((total_tx_power > TRANSMIT_POWER_TOTAL).float())
-
 
             # ================================
             # 準備注入
             # ================================
-            S, B, M, N, K = INJECTION_SAMPLES, h_dk_hat.shape[0], TX_ANT, RIS_UNIT, UAV_COMM    # 簡寫
+            S, B_short, M, N, K = INJECTION_SAMPLES, h_dk_block.shape[0], TX_ANT, RIS_UNIT, UAV_COMM    # 簡寫，B_short=B*L
 
             # 使用 .unsqueeze(0) 新增第0維度 供INJ用
-            # 使用 .expand       功能上"複製"通道成S份 (實際較複雜但最終是複製)
-            h_dk_rep = h_dk_hat.unsqueeze(0).expand(S, B, M, K)
-            h_rk_rep = h_rk_hat.unsqueeze(0).expand(S, B, N, K)
-            G_rep    = G_hat.unsqueeze(0).expand(S, B, N, M)
-            g_dt_rep = g_dt_hat.unsqueeze(0).expand(S, B, M, 1)
+            # 使用 .expand       功能上"複製"每個short-term slot成S份 (實際較複雜但最終是複製)
+            h_dk_rep = h_dk_block.unsqueeze(0).expand(S,B_short,M,K)
+            h_rk_rep = h_rk_block.unsqueeze(0).expand(S,B_short,N,K)
+            G_rep    = G_block.unsqueeze(0).expand(S,B_short,N,M)
+            g_dt_rep = g_dt_block.unsqueeze(0).expand(S,B_short,M,1)
 
             # 注入不確定：INJECTION_VARIANCE 是相對通道功率
             # noise power = INJECTION_VARIANCE * mean(|channel|^2)
-            h_dk_power = torch.mean(torch.abs(h_dk_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-            h_rk_power = torch.mean(torch.abs(h_rk_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-            G_power    = torch.mean(torch.abs(G_rep)    ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
-            g_dt_power = torch.mean(torch.abs(g_dt_rep) ** 2, dim=(2, 3), keepdim=True).real   # (S,B,1,1)
+            h_dk_power = torch.mean(torch.abs(h_dk_rep) ** 2,dim=(2,3),keepdim=True).real   # (S,B*L,1,1)
+            h_rk_power = torch.mean(torch.abs(h_rk_rep) ** 2,dim=(2,3),keepdim=True).real   # (S,B*L,1,1)
+            G_power    = torch.mean(torch.abs(G_rep)    ** 2,dim=(2,3),keepdim=True).real   # (S,B*L,1,1)
+            g_dt_power = torch.mean(torch.abs(g_dt_rep) ** 2,dim=(2,3),keepdim=True).real   # (S,B*L,1,1)
 
             # 注入不確定
-            h_dk_inj = h_dk_rep + torch.sqrt(INJECTION_VARIANCE * h_dk_power) * complex_awgn(h_dk_rep.shape, 1.0, DEVICE, h_dk_rep.dtype)   # (S,B,M,K)
-            h_rk_inj = h_rk_rep + torch.sqrt(INJECTION_VARIANCE * h_rk_power) * complex_awgn(h_rk_rep.shape, 1.0, DEVICE, h_rk_rep.dtype)   # (S,B,N,K)
-            G_inj    = G_rep    + torch.sqrt(INJECTION_VARIANCE * G_power)    * complex_awgn(G_rep.shape,    1.0, DEVICE, G_rep.dtype)      # (S,B,N,M)
-            g_dt_inj = g_dt_rep + torch.sqrt(INJECTION_VARIANCE * g_dt_power) * complex_awgn(g_dt_rep.shape, 1.0, DEVICE, g_dt_rep.dtype)   # (S,B,M,1)
+            h_dk_inj = h_dk_rep + torch.sqrt(INJECTION_VARIANCE * h_dk_power) * complex_awgn(h_dk_rep.shape,1.0,DEVICE,h_dk_rep.dtype)
+            h_rk_inj = h_rk_rep + torch.sqrt(INJECTION_VARIANCE * h_rk_power) * complex_awgn(h_rk_rep.shape,1.0,DEVICE,h_rk_rep.dtype)
+            G_inj    = G_rep    + torch.sqrt(INJECTION_VARIANCE * G_power)    * complex_awgn(G_rep.shape,1.0,DEVICE,G_rep.dtype)
+            g_dt_inj = g_dt_rep + torch.sqrt(INJECTION_VARIANCE * g_dt_power) * complex_awgn(g_dt_rep.shape,1.0,DEVICE,g_dt_rep.dtype)
 
-            # 複製theta
-            theta_rep = theta.unsqueeze(0).expand(S, B, N)
+            # 同一個long-term block的L個slots共用theta；每個slot的S組injection也共用該theta
+            theta_rep = theta_block.unsqueeze(0).expand(S,B_short,N)
 
-            # 複製W_C_raw與W_R_raw
-            # 同一筆estimated channel的S組injection共用相同beamformer
-            W_C_rep = W_C_raw.unsqueeze(0).expand(S,B,M,K)
-            W_R_rep = W_R_raw.unsqueeze(0).expand(S,B,M,RADAR_STREAMS)
+            # 每個short-term slot的S組injection共用該slot由nominal channel產生的beamformer
+            W_C_rep = W_C_raw.unsqueeze(0).expand(S,B_short,M,K)
+            W_R_rep = W_R_raw.unsqueeze(0).expand(S,B_short,M,RADAR_STREAMS)
 
-            # 為了使用(comm_net.)副函式,先將4維壓到3維"注意! 此舉不會破壞5%的抽取"
-            h_dk_flat  = h_dk_inj.reshape(S*B, M, K)
-            h_rk_flat  = h_rk_inj.reshape(S*B, N, K)
-            G_flat     = G_inj.reshape(S*B, N, M)
-            g_dt_flat  = g_dt_inj.reshape(S*B, M, 1)
+            # 為了使用(comm_net.)副函式,先將S與B*L維度壓平，S維稍後會還原取quantile
+            h_dk_flat = h_dk_inj.reshape(S*B_short,M,K)
+            h_rk_flat = h_rk_inj.reshape(S*B_short,N,K)
+            G_flat    = G_inj.reshape(S*B_short,N,M)
+            g_dt_flat = g_dt_inj.reshape(S*B_short,M,1)
 
-            theta_flat = theta_rep.reshape(S*B, N)
-            W_C_flat   = W_C_rep.reshape(S*B, M, K)
-            W_R_flat   = W_R_rep.reshape(S*B,M,RADAR_STREAMS)
+            theta_flat = theta_rep.reshape(S*B_short,N)
+            W_C_flat   = W_C_rep.reshape(S*B_short,M,K)
+            W_R_flat   = W_R_rep.reshape(S*B_short,M,RADAR_STREAMS)
 
-            H_eff_H_flat = comm_net.compute_effective_channel(h_dk_flat,h_rk_flat,G_flat,theta_flat)                # (S*B, K, M)
+            H_eff_H_flat = comm_net.compute_effective_channel(h_dk_flat,h_rk_flat,G_flat,theta_flat)  # (S*B*L,K,M)
 
             metrics_flat = comm_net.compute_isac_batch_performance(H_eff_H_flat,g_dt_flat,W_C_flat,W_R_flat)
             '''Output:
 
                 raw per-channel-sample tensors:
-                    sinr          : (S*B, K), linear
-                    sinr_db       : (S*B, K), dB
-                    rate          : (S*B, K)
-                    sumrate       : (S*B,)
-                    target_snr    : (S*B,), linear
-                    target_snr_db : (S*B,), dB
+                    sinr          : (S*B*L,K), linear
+                    sinr_db       : (S*B*L,K), dB
+                    rate          : (S*B*L,K)
+                    sumrate       : (S*B*L,)
+                    target_snr    : (S*B*L,), linear
+                    target_snr_db : (S*B*L,), dB
 
-                S*B-average display values: 對所有injeton * channel 平均
+                S*B*L-average display values: 對所有injection * short-term slot平均
                     注意不可以用這裡! 這混淆了取5%
                     sinr_user_mean      : (K,), linear
                     sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
@@ -545,45 +573,46 @@ if __name__ == "__main__":
             '''
             
             # 還原shape並取輸出結果
-            robust_allUE_rate      = metrics_flat["rate"].reshape(S,B,K)                # (S,B,K) 各UE在每筆injection channel的rate
-            robust_target_snr      = metrics_flat["target_snr"].reshape(S,B)            # (S,B)   每一筆injection channel的target SNR，linear
-            robust_target_snr_db   = metrics_flat["target_snr_db"].reshape(S,B)         # (S,B), dB
+            robust_allUE_rate    = metrics_flat["rate"].reshape(S,B,LT_BLOCK_SIZE,K)              # (S,B,L,K)
+            robust_target_snr    = metrics_flat["target_snr"].reshape(S,B,LT_BLOCK_SIZE)           # (S,B,L), linear
+            robust_target_snr_db = metrics_flat["target_snr_db"].reshape(S,B,LT_BLOCK_SIZE)        # (S,B,L), dB
 
-            robust_signal          = metrics_flat["signal"].reshape(S,B,K)              # (S,B,K) 各UE的signal power
-            robust_comm_interf     = metrics_flat["comm_interf"].reshape(S,B,K)         # (S,B,K) 各UE的communication interference
-            robust_radar_interf    = metrics_flat["radar_interf"].reshape(S,B,K)        # (S,B,K) 各UE的radar interference
-            robust_noise           = metrics_flat["noise"]                              # scalar
+            robust_signal       = metrics_flat["signal"].reshape(S,B,LT_BLOCK_SIZE,K)              # (S,B,L,K)
+            robust_comm_interf  = metrics_flat["comm_interf"].reshape(S,B,LT_BLOCK_SIZE,K)         # (S,B,L,K)
+            robust_radar_interf = metrics_flat["radar_interf"].reshape(S,B,LT_BLOCK_SIZE,K)        # (S,B,L,K)
+            robust_noise        = metrics_flat["noise"]                                             # scalar
 
-            # Robust計算
-            worstUE_rate          = torch.min(robust_allUE_rate,dim=2).values           # (S,B) 每一筆injection realization先找worst UE
-            robust_per_channel    = torch.quantile(worstUE_rate,OUTAGE_QUANTILE,dim=0)  # (B,) 每個estimated channel對S取Q0.05
-            robust                = torch.mean(robust_per_channel)                      # scalar 最後對B筆estimated channel平均
+            # Robust計算：每個slot先對K取worst UE，再對S取quantile，最後對L與B平均
+            worstUE_rate       = torch.min(robust_allUE_rate,dim=3).values                          # (S,B,L)
+            robust_per_slot    = torch.quantile(worstUE_rate,OUTAGE_QUANTILE,dim=0)                 # (B,L)
+            robust_per_channel = torch.mean(robust_per_slot,dim=1)                                  # (B,) 保留原變數名稱，現在代表每個long-term block
+            robust             = torch.mean(robust_per_channel)                                     # scalar
 
             # SINR組成 
-            robust_signal_power          = torch.mean(robust_signal,dim=(0,1))          # (K,) 對S,B平均
-            robust_comm_interf_power     = torch.mean(robust_comm_interf,dim=(0,1))     # (K,)
-            robust_radar_interf_power    = torch.mean(robust_radar_interf,dim=(0,1))    # (K,)
+            robust_signal_power       = torch.mean(robust_signal,dim=(0,1,2))       # (K,) 對S,B,L平均
+            robust_comm_interf_power  = torch.mean(robust_comm_interf,dim=(0,1,2))  # (K,)
+            robust_radar_interf_power = torch.mean(robust_radar_interf,dim=(0,1,2)) # (K,)
 
-            # Robust target SNR：對所有S筆injection與B筆estimated channel做linear mean，再轉dB
-            robust_target_snr_mean = torch.mean(robust_target_snr)                    # scalar, linear
+            # Robust target SNR：對所有S筆injection、B個blocks與L個slots做linear mean，再轉dB
+            robust_target_snr_mean = torch.mean(robust_target_snr)
             robust_target_snr_mean_db = 10.0 * torch.log10(robust_target_snr_mean.clamp_min(1e-12))
 
-            # 每筆 estimated channel 各自對 S 筆 injection 取 target SNR Q10%
-            target_snr_q10_db = torch.quantile(robust_target_snr_db,TAR_OUTAGE_QUANTILE,dim=0)  # (B,)
+            # 每個short-term slot各自對S筆injection取target SNR Q10%
+            target_snr_q10_db = torch.quantile(robust_target_snr_db,TAR_OUTAGE_QUANTILE,dim=0)  # (B,L)
 
             # Q10% 與 4 dB 門檻比較，供loss反向傳播
-            sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - target_snr_q10_db)       # (B,)
+            sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - target_snr_q10_db)       # (B,L)
             sensing_penalty = torch.mean(sensing_deficit_db)                                    # scalar
 
-            # 每筆 estimated channel 在 S 筆 injection 下的實際違反率
+            # 每個short-term slot在S筆injection下的實際違反率
             sensing_violation_per_channel = torch.mean(
                 (robust_target_snr_db < SENSING_SNR_THRESHOLD_DB).float(),dim=0
-            )                                                                                   # (B,)
+            )                                                                                   # (B,L)
 
-            # 全部 estimated channels 的平均違反率
+            # 全部short-term slots的平均違反率
             sensing_violation_rate = torch.mean(sensing_violation_per_channel)                   # scalar
 
-            # 有多少比例的 estimated channels 未滿足「違反率 <= 10%」
+            # 有多少比例的short-term slots未滿足「違反率 <= 10%」
             sensing_channel_failure_rate = torch.mean((sensing_violation_per_channel > TAR_OUTAGE_QUANTILE).float())    # scalar
 
             # loss function
@@ -636,144 +665,210 @@ if __name__ == "__main__":
         }
 
         # ================================
-        # Validation: 全部 validation estimated channels，不使用 chunk
+        # Validation: 固定 0,L,2L,... block starts 的全部 val trajectories，injection使用chunk避免GPU OOM
         # 每個 epoch 重新隨機產生 validation injection errors
         # ================================
         comm_net.eval()
         radar_net.eval()
 
         with torch.no_grad():
-            # 載入 validation estimated channels
-            val_h_dk = torch.as_tensor(val_dataset["h_dk_hat"],dtype=torch.complex64,device=DEVICE)
-            val_h_rk = torch.as_tensor(val_dataset["h_rk_hat"],dtype=torch.complex64,device=DEVICE)
-            val_G = torch.as_tensor(val_dataset["G_hat"],dtype=torch.complex64,device=DEVICE)
-            val_g_dt = torch.as_tensor(val_dataset["g_dt_hat"],dtype=torch.complex64,device=DEVICE)
+            # ThetaNet只看每個validation long-term block的start-slot CSI
+            val_h_dk = torch.as_tensor(val_dataset["h_dk"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)  # (B_val,M,K)
+            val_h_rk = torch.as_tensor(val_dataset["h_rk"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)  # (B_val,N,K)
+            val_G    = torch.as_tensor(val_dataset["G"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)     # (B_val,N,M)
+            val_g_dt = torch.as_tensor(val_dataset["g_dt"][val_trajectory_ids,val_channel_ids],dtype=torch.complex64,device=DEVICE)  # (B_val,M,1)
 
-            # 固定 pretrained ThetaNet，根據 validation estimated channels 產生 theta
-            val_theta = theta_net(val_h_dk,val_h_rk,val_G,val_g_dt)
+            # 固定 pretrained ThetaNet，只根據block-start CSI產生theta
+            val_theta = theta_net(val_h_dk,val_h_rk,val_G,val_g_dt)  # (B_val,N)
 
-            # 根據 estimated channels 與 val_theta 組成 estimated effective channel
-            val_H_eff_H = comm_net.compute_effective_channel(val_h_dk,val_h_rk,val_G,val_theta)
+            val_block_ids = val_channel_ids[:,None] + np.arange(LT_BLOCK_SIZE)[None,:]  # (B_val,L)
 
-            # 由本epoch的CommNet與RadarNet直接產生beamformer
-            # NN同時決定beam direction與power allocation
-            val_W_C_raw = comm_net(val_H_eff_H,val_g_dt)
-            val_W_R_raw = radar_net(val_H_eff_H,val_g_dt)
+            val_h_dk_block = torch.as_tensor(val_dataset["h_dk"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            val_h_rk_block = torch.as_tensor(val_dataset["h_rk"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            val_G_block    = torch.as_tensor(val_dataset["G"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
+            val_g_dt_block = torch.as_tensor(val_dataset["g_dt"][val_trajectory_ids[:,None],val_block_ids],dtype=torch.complex64,device=DEVICE)
 
-            # 每筆validation estimated channel的beamformer power
+            val_h_dk_block = val_h_dk_block.reshape(B_val*LT_BLOCK_SIZE,TX_ANT,UAV_COMM)
+            val_h_rk_block = val_h_rk_block.reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT,UAV_COMM)
+            val_G_block    = val_G_block.reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT,TX_ANT)
+            val_g_dt_block = val_g_dt_block.reshape(B_val*LT_BLOCK_SIZE,TX_ANT,1)
+            val_theta_block = val_theta[:,None,:].expand(-1,LT_BLOCK_SIZE,-1).reshape(B_val*LT_BLOCK_SIZE,RIS_UNIT)
+
+            # 每個slot使用自己的nominal channel與固定theta產生effective channel與beamformer
+            val_H_eff_H = comm_net.compute_effective_channel(val_h_dk_block,val_h_rk_block,val_G_block,val_theta_block)
+            val_W_C_raw = comm_net(val_H_eff_H,val_g_dt_block)
+            val_W_R_raw = radar_net(val_H_eff_H,val_g_dt_block)
+
+            # 每個validation short-term slot的beamformer power
             val_W_C_power = torch.sum(torch.abs(val_W_C_raw) ** 2,dim=(1,2)).real
             val_W_R_power = torch.sum(torch.abs(val_W_R_raw) ** 2,dim=(1,2)).real
             val_total_tx_power = val_W_C_power + val_W_R_power
 
-            val_tx_power_excess = torch.relu(val_total_tx_power - TRANSMIT_POWER_TOTAL)  # (B,), unit: W
-            val_tx_power_penalty = torch.mean(val_tx_power_excess)                       # scalar
+            val_total_tx_power_ratio = val_total_tx_power / TRANSMIT_POWER_TOTAL
+            val_tx_power_excess_ratio = torch.relu(val_total_tx_power_ratio - 1.0)
+            val_tx_power_penalty = torch.mean(val_tx_power_excess_ratio ** 2)# scalar
 
             val_tx_power_violation_rate = torch.mean((val_total_tx_power > TRANSMIT_POWER_TOTAL).float())
 
-            val_S, val_B, val_M, val_N, val_K = INJECTION_SAMPLES, val_h_dk.shape[0], TX_ANT, RIS_UNIT, UAV_COMM
+            val_S, val_M, val_N, val_K = INJECTION_SAMPLES, TX_ANT, RIS_UNIT, UAV_COMM
 
-            # 將每筆 validation estimated channel 複製成 val_S 筆 uncertainty realizations
-            val_h_dk_rep = val_h_dk.unsqueeze(0).expand(val_S,val_B,val_M,val_K)
-            val_h_rk_rep = val_h_rk.unsqueeze(0).expand(val_S,val_B,val_N,val_K)
-            val_G_rep = val_G.unsqueeze(0).expand(val_S,val_B,val_N,val_M)
-            val_g_dt_rep = val_g_dt.unsqueeze(0).expand(val_S,val_B,val_M,1)
+            # ================================
+            # Validation injection chunk
+            # ================================
+            # 只切B_val這個long-term block維度，每個block仍完整保留L個slots與val_S筆injection
+            # 因此robust quantile、sensing quantile與所有validation metric的數學定義完全不變
+            val_robust_sum = torch.zeros((),dtype=torch.float32,device=DEVICE)
+            val_robust_signal_sum = torch.zeros(val_K,dtype=torch.float32,device=DEVICE)
+            val_robust_comm_interf_sum = torch.zeros(val_K,dtype=torch.float32,device=DEVICE)
+            val_robust_radar_interf_sum = torch.zeros(val_K,dtype=torch.float32,device=DEVICE)
+            val_robust_target_snr_sum = torch.zeros((),dtype=torch.float32,device=DEVICE)
+            val_sensing_penalty_sum = torch.zeros((),dtype=torch.float32,device=DEVICE)
+            val_sensing_violation_sum = torch.zeros((),dtype=torch.float32,device=DEVICE)
+            val_sensing_channel_failure_sum = torch.zeros((),dtype=torch.float32,device=DEVICE)
+            val_robust_noise = None
 
-            # 每筆 estimated channel block 的 empirical mean power
-            val_h_dk_power = torch.mean(torch.abs(val_h_dk_rep) ** 2,dim=(2,3),keepdim=True).real
-            val_h_rk_power = torch.mean(torch.abs(val_h_rk_rep) ** 2,dim=(2,3),keepdim=True).real
-            val_G_power = torch.mean(torch.abs(val_G_rep) ** 2,dim=(2,3),keepdim=True).real
-            val_g_dt_power = torch.mean(torch.abs(val_g_dt_rep) ** 2,dim=(2,3),keepdim=True).real
+            for val_chunk_start in range(0,B_val,VAL_CHUNK_SIZE):
+                val_chunk_end = min(val_chunk_start + VAL_CHUNK_SIZE,B_val)
+                val_B_chunk = val_chunk_end - val_chunk_start
 
-            # 每個 epoch 重新隨機產生 validation injection errors
-            val_h_dk_inj = val_h_dk_rep + torch.sqrt(INJECTION_VARIANCE * val_h_dk_power) * complex_awgn(val_h_dk_rep.shape,1.0,DEVICE,val_h_dk_rep.dtype)
-            val_h_rk_inj = val_h_rk_rep + torch.sqrt(INJECTION_VARIANCE * val_h_rk_power) * complex_awgn(val_h_rk_rep.shape,1.0,DEVICE,val_h_rk_rep.dtype)
-            val_G_inj = val_G_rep + torch.sqrt(INJECTION_VARIANCE * val_G_power) * complex_awgn(val_G_rep.shape,1.0,DEVICE,val_G_rep.dtype)
-            val_g_dt_inj = val_g_dt_rep + torch.sqrt(INJECTION_VARIANCE * val_g_dt_power) * complex_awgn(val_g_dt_rep.shape,1.0,DEVICE,val_g_dt_rep.dtype)
+                # val_*_block原本shape第一維是B_val*L，因此依long-term block換算short-term slot範圍
+                val_short_start = val_chunk_start * LT_BLOCK_SIZE
+                val_short_end = val_chunk_end * LT_BLOCK_SIZE
+                val_B_short_chunk = val_B_chunk * LT_BLOCK_SIZE
 
-            # 同一筆 estimated channel 的 val_S 筆 injected channels
-            # 共用同一組 theta、W_C 與 W_R
-            val_theta_rep = val_theta.unsqueeze(0).expand(val_S,val_B,val_N)
-            val_W_C_rep = val_W_C_raw.unsqueeze(0).expand(val_S,val_B,val_M,val_K)
-            val_W_R_rep = val_W_R_raw.unsqueeze(0).expand(val_S,val_B,val_M,RADAR_STREAMS)
+                val_h_dk_block_chunk = val_h_dk_block[val_short_start:val_short_end]
+                val_h_rk_block_chunk = val_h_rk_block[val_short_start:val_short_end]
+                val_G_block_chunk = val_G_block[val_short_start:val_short_end]
+                val_g_dt_block_chunk = val_g_dt_block[val_short_start:val_short_end]
 
-            # 將 validation 的 S 與 B 維度壓平，供共用 physics functions 使用
-            val_h_dk_flat = val_h_dk_inj.reshape(val_S*val_B,val_M,val_K)
-            val_h_rk_flat = val_h_rk_inj.reshape(val_S*val_B,val_N,val_K)
-            val_G_flat = val_G_inj.reshape(val_S*val_B,val_N,val_M)
-            val_g_dt_flat = val_g_dt_inj.reshape(val_S*val_B,val_M,1)
+                val_theta_block_chunk = val_theta_block[val_short_start:val_short_end]
+                val_W_C_raw_chunk = val_W_C_raw[val_short_start:val_short_end]
+                val_W_R_raw_chunk = val_W_R_raw[val_short_start:val_short_end]
 
-            # 使用 injected true channels 重新組成 effective channel
-            # theta、W_C、W_R 仍由 estimated channels 決定並保持固定
-            val_theta_flat = val_theta_rep.reshape(val_S*val_B,val_N)
-            val_W_C_flat = val_W_C_rep.reshape(val_S*val_B,val_M,val_K)
-            val_W_R_flat = val_W_R_rep.reshape(val_S*val_B,val_M,RADAR_STREAMS)
+                # 將每個 validation short-term slot 複製成 val_S 筆 uncertainty realizations
+                val_h_dk_rep = val_h_dk_block_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_M,val_K)
+                val_h_rk_rep = val_h_rk_block_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_N,val_K)
+                val_G_rep    = val_G_block_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_N,val_M)
+                val_g_dt_rep = val_g_dt_block_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_M,1)
 
-            val_H_eff_H_flat = comm_net.compute_effective_channel(val_h_dk_flat,val_h_rk_flat,val_G_flat,val_theta_flat)
+                # 每個short-term slot的 empirical mean channel power
+                val_h_dk_power = torch.mean(torch.abs(val_h_dk_rep) ** 2,dim=(2,3),keepdim=True).real
+                val_h_rk_power = torch.mean(torch.abs(val_h_rk_rep) ** 2,dim=(2,3),keepdim=True).real
+                val_G_power = torch.mean(torch.abs(val_G_rep) ** 2,dim=(2,3),keepdim=True).real
+                val_g_dt_power = torch.mean(torch.abs(val_g_dt_rep) ** 2,dim=(2,3),keepdim=True).real
 
-            val_metrics_flat = comm_net.compute_isac_batch_performance(val_H_eff_H_flat,val_g_dt_flat,val_W_C_flat,val_W_R_flat)
-            """ 輸出結果 :
-                    SINR power components:
-                        signal       : (S*B, K)
-                        comm_interf  : (S*B, K)
-                        radar_interf : (S*B, K)
-                        noise        : scalar
+                # 每個 epoch 重新隨機產生 validation injection errors
+                val_h_dk_inj = val_h_dk_rep + torch.sqrt(INJECTION_VARIANCE * val_h_dk_power) * complex_awgn(val_h_dk_rep.shape,1.0,DEVICE,val_h_dk_rep.dtype)
+                val_h_rk_inj = val_h_rk_rep + torch.sqrt(INJECTION_VARIANCE * val_h_rk_power) * complex_awgn(val_h_rk_rep.shape,1.0,DEVICE,val_h_rk_rep.dtype)
+                val_G_inj = val_G_rep + torch.sqrt(INJECTION_VARIANCE * val_G_power) * complex_awgn(val_G_rep.shape,1.0,DEVICE,val_G_rep.dtype)
+                val_g_dt_inj = val_g_dt_rep + torch.sqrt(INJECTION_VARIANCE * val_g_dt_power) * complex_awgn(val_g_dt_rep.shape,1.0,DEVICE,val_g_dt_rep.dtype)
 
-                    raw per-channel-sample tensors:
-                        sinr          : (S*B, K), linear
-                        sinr_db       : (S*B, K), dB
-                        rate          : (S*B, K)
-                        sumrate       : (S*B,)
-                        target_snr    : (S*B,), linear
-                        target_snr_db : (S*B,), dB
+                # 同一個block的L slots共用theta；每個slot的val_S筆injection共用該slot beamformer
+                val_theta_rep = val_theta_block_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_N)
+                val_W_C_rep = val_W_C_raw_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_M,val_K)
+                val_W_R_rep = val_W_R_raw_chunk.unsqueeze(0).expand(val_S,val_B_short_chunk,val_M,RADAR_STREAMS)
 
-                    S*B-average display values: 對所有injection與channel平均
-                        sinr_user_mean      : (K,), linear
-                        sinr_user_mean_db   : (K,), dB = 10log10(mean linear SINR)
-                        rate_user_mean      : (K,)
-                        sumrate_mean        : scalar
-                        target_snr_mean     : scalar, linear
-                        target_snr_mean_db  : scalar, dB = 10log10(mean linear target SNR)
-            """
+                # 將 validation 的 S 與 B_chunk*L 維度壓平，供共用 physics functions 使用
+                val_h_dk_flat = val_h_dk_inj.reshape(val_S*val_B_short_chunk,val_M,val_K)
+                val_h_rk_flat = val_h_rk_inj.reshape(val_S*val_B_short_chunk,val_N,val_K)
+                val_G_flat = val_G_inj.reshape(val_S*val_B_short_chunk,val_N,val_M)
+                val_g_dt_flat = val_g_dt_inj.reshape(val_S*val_B_short_chunk,val_M,1)
 
-            # 還原shape並取輸出結果
-            val_robust_allUE_rate = val_metrics_flat["rate"].reshape(val_S,val_B,val_K)             # (S,B,K) 各UE在每筆injection channel的rate
-            val_robust_target_snr = val_metrics_flat["target_snr"].reshape(val_S,val_B)             # (S,B) 每一筆injection channel的target SNR，linear
-            val_robust_target_snr_db = val_metrics_flat["target_snr_db"].reshape(val_S,val_B)       # (S,B), dB
+                # 使用 injected true channels 重新組成 effective channel
+                # theta、W_C、W_R 仍由nominal channels決定並保持固定
+                val_theta_flat = val_theta_rep.reshape(val_S*val_B_short_chunk,val_N)
+                val_W_C_flat = val_W_C_rep.reshape(val_S*val_B_short_chunk,val_M,val_K)
+                val_W_R_flat = val_W_R_rep.reshape(val_S*val_B_short_chunk,val_M,RADAR_STREAMS)
 
-            val_robust_signal = val_metrics_flat["signal"].reshape(val_S,val_B,val_K)               # (S,B,K) 各UE的signal power
-            val_robust_comm_interf = val_metrics_flat["comm_interf"].reshape(val_S,val_B,val_K)     # (S,B,K) 各UE的communication interference
-            val_robust_radar_interf = val_metrics_flat["radar_interf"].reshape(val_S,val_B,val_K)   # (S,B,K) 各UE的radar interference
-            val_robust_noise        = val_metrics_flat["noise"]                                     # scalar
+                val_H_eff_H_flat = comm_net.compute_effective_channel(val_h_dk_flat,val_h_rk_flat,val_G_flat,val_theta_flat)
 
-            # Robust計算
-            val_worstUE_rate = torch.min(val_robust_allUE_rate,dim=2).values                    # (S,B) 每一筆injection realization先找worst UE
-            val_robust_per_channel = torch.quantile(val_worstUE_rate,OUTAGE_QUANTILE,dim=0)     # (B,) 每個estimated channel對S取Q0.05
-            val_robust = torch.mean(val_robust_per_channel)                                     # scalar 最後對B筆estimated channel平均
+                val_metrics_flat = comm_net.compute_isac_batch_performance(val_H_eff_H_flat,val_g_dt_flat,val_W_C_flat,val_W_R_flat)
+                ''' 輸出結果 :
+                        SINR power components:
+                            signal       : (S*B_chunk*L,K)
+                            comm_interf  : (S*B_chunk*L,K)
+                            radar_interf : (S*B_chunk*L,K)
+                            noise        : scalar
 
-            # SINR組成
-            val_robust_signal_power = torch.mean(val_robust_signal,dim=(0,1))               # (K,) 對S、B平均
-            val_robust_comm_interf_power = torch.mean(val_robust_comm_interf,dim=(0,1))     # (K,)
-            val_robust_radar_interf_power = torch.mean(val_robust_radar_interf,dim=(0,1))   # (K,)
+                        raw per-channel-sample tensors:
+                            sinr          : (S*B_chunk*L,K), linear
+                            sinr_db       : (S*B_chunk*L,K), dB
+                            rate          : (S*B_chunk*L,K)
+                            sumrate       : (S*B_chunk*L,)
+                            target_snr    : (S*B_chunk*L,), linear
+                            target_snr_db : (S*B_chunk*L,), dB
+                '''
 
-            # Robust target SNR：對所有S筆injection與B筆estimated channel做linear mean，再轉dB
-            val_robust_target_snr_mean = torch.mean(val_robust_target_snr)                  # scalar, linear
+                # 還原shape並取輸出結果
+                val_robust_allUE_rate = val_metrics_flat["rate"].reshape(val_S,val_B_chunk,LT_BLOCK_SIZE,val_K)
+                val_robust_target_snr = val_metrics_flat["target_snr"].reshape(val_S,val_B_chunk,LT_BLOCK_SIZE)
+                val_robust_target_snr_db = val_metrics_flat["target_snr_db"].reshape(val_S,val_B_chunk,LT_BLOCK_SIZE)
+
+                val_robust_signal = val_metrics_flat["signal"].reshape(val_S,val_B_chunk,LT_BLOCK_SIZE,val_K)
+                val_robust_comm_interf = val_metrics_flat["comm_interf"].reshape(val_S,val_B_chunk,LT_BLOCK_SIZE,val_K)
+                val_robust_radar_interf = val_metrics_flat["radar_interf"].reshape(val_S,val_B_chunk,LT_BLOCK_SIZE,val_K)
+                val_robust_noise = val_metrics_flat["noise"]
+
+                # Robust計算：每個slot先對K取worst UE，再對S取quantile，最後對L與B_val平均
+                val_worstUE_rate = torch.min(val_robust_allUE_rate,dim=3).values                          # (S,B_chunk,L)
+                val_robust_per_slot = torch.quantile(val_worstUE_rate,OUTAGE_QUANTILE,dim=0)              # (B_chunk,L)
+                val_robust_sum += torch.sum(val_robust_per_slot)
+
+                # SINR組成
+                val_robust_signal_sum += torch.sum(val_robust_signal,dim=(0,1,2))
+                val_robust_comm_interf_sum += torch.sum(val_robust_comm_interf,dim=(0,1,2))
+                val_robust_radar_interf_sum += torch.sum(val_robust_radar_interf,dim=(0,1,2))
+
+                # Robust target SNR：累加所有S筆injection、B_chunk個blocks與L個slots的linear target SNR
+                val_robust_target_snr_sum += torch.sum(val_robust_target_snr)
+
+                # 每個short-term slot對S筆injection取target SNR Q10%
+                val_target_snr_q10_db = torch.quantile(val_robust_target_snr_db,TAR_OUTAGE_QUANTILE,dim=0)  # (B_chunk,L)
+
+                # Q10%與4 dB門檻比較
+                val_sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - val_target_snr_q10_db)
+                val_sensing_penalty_sum += torch.sum(val_sensing_deficit_db)
+
+                # 每個short-term slot在S筆injection下的實際違反率
+                val_sensing_violation_per_channel = torch.mean((val_robust_target_snr_db < SENSING_SNR_THRESHOLD_DB).float(),dim=0)  # (B_chunk,L)
+
+                # 累加所有short-term slots的違反率
+                val_sensing_violation_sum += torch.sum(val_sensing_violation_per_channel)
+
+                # 累加有多少short-term slots違反率超過10%
+                val_sensing_channel_failure_sum += torch.sum((val_sensing_violation_per_channel > TAR_OUTAGE_QUANTILE).float())
+
+                # 此chunk計算完成後釋放大型injection tensors與其views，下一個chunk重複使用GPU記憶體
+                del val_h_dk_inj,val_h_rk_inj,val_G_inj,val_g_dt_inj,val_h_dk_flat,val_h_rk_flat,val_G_flat,val_g_dt_flat
+                del val_theta_flat,val_W_C_flat,val_W_R_flat,val_H_eff_H_flat,val_metrics_flat
+                del val_robust_allUE_rate,val_robust_target_snr,val_robust_target_snr_db,val_robust_signal,val_robust_comm_interf,val_robust_radar_interf
+                del val_worstUE_rate,val_robust_per_slot,val_target_snr_q10_db,val_sensing_deficit_db,val_sensing_violation_per_channel
+
+            # ================================
+            # 合併全部 validation chunks
+            # ================================
+            # Robust原本是先對每個slot取quantile，再對全部B_val與L平均；chunk只改計算方式，不改數學定義
+            val_robust = val_robust_sum / (B_val * LT_BLOCK_SIZE)
+
+            # SINR組成：原本對S,B_val,L平均
+            val_metric_count = val_S * B_val * LT_BLOCK_SIZE
+            val_robust_signal_power = val_robust_signal_sum / val_metric_count
+            val_robust_comm_interf_power = val_robust_comm_interf_sum / val_metric_count
+            val_robust_radar_interf_power = val_robust_radar_interf_sum / val_metric_count
+
+            # Robust target SNR：對所有S筆injection、B_val個blocks與L個slots做linear mean，再轉dB
+            val_robust_target_snr_mean = val_robust_target_snr_sum / val_metric_count
             val_robust_target_snr_mean_db = 10.0 * torch.log10(val_robust_target_snr_mean.clamp_min(1e-12))
 
-            # 每筆 estimated channel 對S筆injection取target SNR Q10%
-            val_target_snr_q10_db = torch.quantile(val_robust_target_snr_db,TAR_OUTAGE_QUANTILE,dim=0)  # (B,)
+            # Q10%與感測門檻比較後，對全部B_val與L平均
+            val_short_slot_count = B_val * LT_BLOCK_SIZE
+            val_sensing_penalty = val_sensing_penalty_sum / val_short_slot_count
 
-            # Q10%與4 dB門檻比較
-            val_sensing_deficit_db = torch.relu(SENSING_SNR_THRESHOLD_DB - val_target_snr_q10_db)       # (B,)
-            val_sensing_penalty = torch.mean(val_sensing_deficit_db)                                    # scalar
+            # 所有short-term slots的平均違反率
+            val_sensing_violation_rate = val_sensing_violation_sum / val_short_slot_count
 
-            # 每筆estimated channel在S筆injection下的實際違反率
-            val_sensing_violation_per_channel = torch.mean((val_robust_target_snr_db < SENSING_SNR_THRESHOLD_DB).float(),dim=0)  # (B,)
-
-            # 所有estimated channels的平均違反率
-            val_sensing_violation_rate = torch.mean(val_sensing_violation_per_channel)                   # scalar
-
-            # 有多少比例的estimated channels違反率超過10%
-            val_sensing_channel_failure_rate = torch.mean((val_sensing_violation_per_channel > TAR_OUTAGE_QUANTILE).float())     # scalar
+            # 有多少比例的short-term slots違反率超過10%
+            val_sensing_channel_failure_rate = val_sensing_channel_failure_sum / val_short_slot_count
 
             # loss function
             val_loss = -val_robust + ROB_SENSING_LOSS_WEIGHT * val_sensing_penalty + ROB_TX_POWER_LOSS_WEIGHT * val_tx_power_penalty
