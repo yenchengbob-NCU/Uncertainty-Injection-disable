@@ -1,26 +1,13 @@
 import os
-import math
 import numpy as np
+from scipy.special import j0
 from settings import *
 
-RICIAN_KAPPA = 2.0    # 線性尺度
-Debug = True          # 終端印出檢查
+RICIAN_KAPPA        = 2.0   # 線性尺度
+
 # ================================
 # 基本幾何 / 小工具
 # ================================
-def to_db(x):
-    return 10.0 * np.log10(np.maximum(np.asarray(x, dtype=np.float64), 1e-30))
-
-
-def fmt_db(x):
-    x = np.asarray(to_db(x)).reshape(-1)
-    return "{" + " ".join([f"[{v:.2f}]" for v in x]) + "}"
-
-
-def channel_power(x):
-    return np.mean(np.abs(x) ** 2)
-
-
 def theta_calculater(p1, p2, normal):
     """
     計算從 p1 指向 p2,相對於陣列法線的 signed angle
@@ -53,26 +40,19 @@ def theta_calculater(p1, p2, normal):
 def steering_vector(num_elem, theta):
     """
     ULA steering vector with half-wavelength spacing:
-        a(theta) = exp(-j*pi*n*sin(theta)), n=0,...,N-1
+
+        a(theta) = exp(+j*pi*n*sin(theta)), n=0,...,N-1
 
     輸入：
         num_elem : 陣列元素數
-        theta    : scalar 或 shape=(K,)
+        theta    : 單一角度 (rad)
 
     輸出：
-        shape = (num_elem, 1) 或 (num_elem, K)
+        shape = (num_elem, 1)
     """
-    n = np.arange(num_elem, dtype=float).reshape(-1, 1)
-    t = np.asarray(theta, dtype=float)
+    n = np.arange(num_elem).reshape(-1, 1)
 
-    if t.ndim == 0:
-        t = t.reshape(1, 1)
-    else:
-        t = t.reshape(1, -1)
-
-    s = np.sin(t)
-    s = np.clip(s, -1.0, 1.0)
-    return np.exp(-1j * np.pi * n * s).astype(np.complex64)
+    return np.exp(1j * np.pi * n * np.sin(theta)).astype(np.complex64)
 
 
 def cn01(shape):
@@ -84,6 +64,59 @@ def cn01(shape):
     real = np.random.normal(loc=0.0, scale=std, size=shape)
     imag = np.random.normal(loc=0.0, scale=std, size=shape)
     return (real + 1j * imag).astype(np.complex64)
+
+
+def clarke_sos_process(num_slots, shape, K):
+    """
+    Clarke Sum-of-Sinusoids Rayleigh fading
+
+    輸入：
+        num_slots : time slot 數量
+        shape     : 天線數量 (TX_ANT 或 RIS_UNIT)
+        K         : UE 數量
+
+    輸出：
+        process : (num_slots, shape, K)
+
+    每根天線、每個 UE 各自生成一條獨立的
+    Clarke SOS fading sequence。
+    """
+    L           = 64    # propagation-path 數量
+
+
+    # 每個天線、每個 UE，各自產生 L 個 AoA 與初始相位
+    alpha = np.random.uniform(-np.pi, np.pi, size=(L, shape, K)).astype(np.float32) # (每個散射路徑,每個天線,每個UE)
+    phi   = np.random.uniform(-np.pi, np.pi, size=(L, shape, K)).astype(np.float32)
+
+
+    # 計算每個 sinusoid 的 Doppler frequency
+    doppler = (MAX_DOPPLER * np.cos(alpha)).astype(np.float32)                      # shape(L,shape,K)
+
+    # 建立完整 trajectory 的時間軸
+    time = np.arange(num_slots, dtype=np.float32) * SLOT_DURATION                   # 將slot索引換成真正時間
+
+    # 建立通道矩陣
+    process = np.zeros((num_slots, shape, K), dtype=np.complex64)                   # shape(num_slots,shape,K)
+
+
+    # Clarke SOS：累加 L 個 complex sinusoids
+    for l in range(L):
+        """補充:
+            原本time的shape是(num_slots) 使用time[:, None, None] 轉成(num_slots,1,1)
+            doppler 的 shape 為 (L, shape, K)，取出 doppler[l] 後為 (shape, K)。
+            time[:, None, None] 與 doppler[l][None, :, :] 相乘後為 (num_slots, shape, K)。
+
+            他等效於for k for m  for l 再第t個slot所產生的通道
+
+        """
+        phase = 2.0 * np.pi * time[:, None, None] * doppler[l][None, :, :] + phi[l][None, :, :]
+
+        process += np.exp(1j * phase).astype(np.complex64)
+
+    # 正規化
+    process /= np.sqrt(float(L))
+
+    return process
 
 
 def dist(p1, p2):
@@ -108,230 +141,183 @@ def path_loss_power(d, exponent):
     return beta.astype(np.float32)
 
 
-def print_dataset_debug(data):
-    
-    print("\n[DEBUG] dataset_train.npz 內容檢查")
-
-    print("\n[DEBUG] 6 組 path loss, unit = dB")
-    print(f"{'pl_BS_UE':<13s}: {fmt_db(data['pl_BS_UE']):<42s} # BS -> UE 單程 PL")
-    print(f"{'pl_RIS_UE':<13s}: {fmt_db(data['pl_RIS_UE']):<42s} # RIS -> UE 單程 PL")
-    print(f"{'pl_BS_RIS':<13s}: {fmt_db(data['pl_BS_RIS']):<42s} # BS -> RIS 單程 PL")
-    print(f"{'pl_BS_RIS_UE':<13s}: {fmt_db(data['pl_BS_RIS_UE']):<42s} # BS -> RIS -> UE 串接 PL")
-    print(f"{'pl_BS_TAR':<13s}: {fmt_db(data['pl_BS_TAR']):<42s} # BS -> TAR 單程 PL")
-    print(f"{'pl_BS_TAR_BS':<13s}: {fmt_db(data['pl_BS_TAR_BS']):<42s} # BS -> TAR -> BS 雙程 PL")
-
-    print("\n[DEBUG] 4 組帶 PL 的估測通道大小與平均功率")
-    print(
-        f"{'h_dk_hat':<8s}: shape={str(data['h_dk_hat'].shape):<16s}, "
-        f"power={channel_power(data['h_dk_hat']):.4e}, "
-        f"power_dB={float(to_db(channel_power(data['h_dk_hat']))):.2f} dB"
-    )
-    print(
-        f"{'h_rk_hat':<8s}: shape={str(data['h_rk_hat'].shape):<16s}, "
-        f"power={channel_power(data['h_rk_hat']):.4e}, "
-        f"power_dB={float(to_db(channel_power(data['h_rk_hat']))):.2f} dB"
-    )
-    print(
-        f"{'G_hat':<8s}: shape={str(data['G_hat'].shape):<16s}, "
-        f"power={channel_power(data['G_hat']):.4e}, "
-        f"power_dB={float(to_db(channel_power(data['G_hat']))):.2f} dB"
-    )
-    print(
-        f"{'g_dt_hat':<8s}: shape={str(data['g_dt_hat'].shape):<16s}, "
-        f"power={channel_power(data['g_dt_hat']):.4e}, "
-        f"power_dB={float(to_db(channel_power(data['g_dt_hat']))):.2f} dB"
-    )
-
-
-# ================================
-# 幾何相關量：由指定 layout 計算
-# ================================
-
-def geometry_from_layout(ue_layout):
-    """
-    根據一組 UE layout 計算通道生成需要的幾何量。
-    """
-    M, N = TX_ANT, RIS_UNIT
-
-    theta_RIS_to_UE = np.array(
-        [theta_calculater(Q_RIS, ue, "-X") for ue in ue_layout],
-        dtype=np.float32
-    )
-
-    theta_BS_to_RIS = theta_calculater(Q_BS, Q_RIS, "+X")
-    theta_RIS_fromB = theta_calculater(Q_RIS, Q_BS, "-X")
-    theta_BS_to_TAR = theta_calculater(Q_BS, Q_UAV_TAR, "+X")
-    
-    # steering_vector
-    aN_RIS_UE  = steering_vector(N, theta_RIS_to_UE)
-    aM_BS_RIS  = steering_vector(M, theta_BS_to_RIS)
-    aN_RIS_frB = steering_vector(N, theta_RIS_fromB)
-    aM_BS_TAR  = steering_vector(M, theta_BS_to_TAR)
-
-    G_LoS = (aN_RIS_frB @ aM_BS_RIS.conj().T).astype(np.complex64)
-
-    d_BS_UE = np.array(
-        [dist(Q_BS, ue) for ue in ue_layout],
-        dtype=np.float32
-    )
-
-    d_RIS_UE = np.array(
-        [dist(Q_RIS, ue) for ue in ue_layout],
-        dtype=np.float32
-    )
-
-    d_BS_RIS = np.float32(dist(Q_BS, Q_RIS))
-    d_BS_TAR = np.float32(dist(Q_BS, Q_UAV_TAR))
-
-    return {
-        "aN_RIS_UE": aN_RIS_UE,
-        "aM_BS_TAR": aM_BS_TAR,
-        "G_LoS": G_LoS,
-        "d_BS_UE": d_BS_UE,
-        "d_RIS_UE": d_RIS_UE,
-        "d_BS_RIS": d_BS_RIS,
-        "d_BS_TAR": d_BS_TAR,
-    }
-
-# ================================
-# Large-scale fading
-# ================================
-
-def large_scale_fading(ue_layout):
-    """
-    輸入: 單組 layout 
-    回傳：
-        pl_BS_UE      : (K,)   BS -> UE  單程 PL
-        pl_BS_RIS     : scalar BS -> RIS 單程 PL
-        pl_RIS_UE     : (K,)   RIS -> UE 單程 PL
-        pl_BS_RIS_UE  : (K,)   BS -> RIS -> UE cascaded PL
-        pl_BS_TAR     : scalar BS -> TAR 單程 PL
-        pl_BS_TAR_BS  : scalar BS -> TAR -> BS 雙程 PL
-    """
-    geo = geometry_from_layout(ue_layout)
-
-    pl_BS_UE  = path_loss_power(geo["d_BS_UE"],PL_EXP_BS_UE)        # (K,)
-    pl_RIS_UE = path_loss_power(geo["d_RIS_UE"],PL_EXP_RIS_UE)      # (K,)
-    pl_BS_RIS = path_loss_power(geo["d_BS_RIS"],PL_EXP_BS_RIS)      # scalar
-    pl_BS_TAR = path_loss_power(geo["d_BS_TAR"],PL_EXP_BS_TAR)      # scalar
-
-    pl_BS_RIS_UE = np.float32(pl_BS_RIS * pl_RIS_UE)                # (K,)
-    pl_BS_TAR_BS = np.float32(pl_BS_TAR ** 2)                       # scalar
-
-    return pl_BS_UE, pl_RIS_UE, pl_BS_RIS, pl_BS_RIS_UE, pl_BS_TAR, pl_BS_TAR_BS
-
-# ================================
-# 真實通道生成 (現在代表估測通道)
-# raw channels 不含 large-scale fading
-# ================================
-def generate_real_channels(n_networks, ue_layout):
-    geo = geometry_from_layout(ue_layout)
-
-    M, N, K = TX_ANT, RIS_UNIT, UAV_COMM
-
-    h_dk_all = np.zeros((n_networks, M, K), dtype=np.complex64)
-    h_rk_all = np.zeros((n_networks, N, K), dtype=np.complex64)
-    G_all    = np.zeros((n_networks, N, M), dtype=np.complex64)
-    g_dt_all = np.zeros((n_networks, M, 1), dtype=np.complex64)
-
-    rho_los  = math.sqrt(RICIAN_KAPPA / (RICIAN_KAPPA + 1.0))
-    rho_nlos = math.sqrt(1.0 / (RICIAN_KAPPA + 1.0))
-
-    aN_RIS_UE = geo["aN_RIS_UE"]   # (N,K)
-    G_LoS     = geo["G_LoS"]       # (N,M)
-    aM_BS_TAR = geo["aM_BS_TAR"]   # (M,1)
-
-    for n in range(n_networks):
-        hdk_nlos = cn01((M, K))
-        hrk_nlos = cn01((N, K))
-        G_nlos   = cn01((N, M))
-
-        # channel model
-        hdk = hdk_nlos                                      # BS -> UE : Rayleigh
-        hrk = rho_los * aN_RIS_UE + rho_nlos * hrk_nlos     # RIS -> UE : Rician
-        Gmm = rho_los * G_LoS     + rho_nlos * G_nlos       # BS -> RIS : Rician
-        gdt = aM_BS_TAR                                     # BS -> Target : deterministic LoS
-
-        h_dk_all[n] = hdk.astype(np.complex64, copy=False)
-        h_rk_all[n] = hrk.astype(np.complex64, copy=False)
-        G_all[n]    = Gmm.astype(np.complex64, copy=False)
-        g_dt_all[n] = gdt.astype(np.complex64, copy=False)
-
-    return h_dk_all, h_rk_all, G_all, g_dt_all
-
-
 # ================================
 # Dataset 生成
 # ================================
-def build_and_save_dataset(channels, save_path, dataset_name):
+def build_and_save_dataset(layout_path, save_path, dataset_name):
     """
-    根據輸入 channel數量 生成固定 dataset,並儲存成 .npz
+    根據輸入軌跡生成 channels,並儲存成 .npz
     """
-    n_channels = int(channels)              # 需要生成的 channels 數量
-    M, N, K = TX_ANT, RIS_UNIT, UAV_COMM    # 簡寫
+    # 載入位置資料
+    with np.load(layout_path) as data:
+        positions = data["positions"].astype(np.float32)
 
-    # 儲存pathloss
-    pl_BS_UE, pl_RIS_UE, pl_BS_RIS, pl_BS_RIS_UE, pl_BS_TAR, pl_BS_TAR_BS = large_scale_fading(UE_LAYOUT) # 對一組layout生成 Path loss
+    N_trajectory, N_slot, K, _ = positions.shape # 有幾條軌跡,1軌跡有多少slot,有幾個用戶,2維座標
 
-    print(f"[{dataset_name}] 開始生成 dataset,共 {n_channels} 個 估測通道 ...")
-    # 固定 layout，所以直接生成 n_channels 筆估測通道
-    h_dk_hat_all, h_rk_hat_all, G_hat_all, g_dt_hat_all = generate_real_channels(n_channels,UE_LAYOUT)
-    
-    # 加上 path loss，成為 NN 輸入使用的帶 PL 估測通道
-    h_dk_hat_all = h_dk_hat_all * np.sqrt(pl_BS_UE).reshape(1, 1, K)
-    h_rk_hat_all = h_rk_hat_all * np.sqrt(pl_RIS_UE).reshape(1, 1, K)
-    G_hat_all    = G_hat_all    * np.sqrt(pl_BS_RIS)
-    g_dt_hat_all = g_dt_hat_all * np.sqrt(pl_BS_TAR)
+    # --------------------------------
+    # 建立完整 channel dataset
+    # --------------------------------
+    h_dk    = np.empty((N_trajectory, N_slot, TX_ANT, K), dtype=np.complex64)           # shape (軌跡數,slot數,M,K)
+    h_rk    = np.empty((N_trajectory, N_slot, RIS_UNIT, K), dtype=np.complex64)         # shape (軌跡數,slot數,N,K)
+    G       = np.empty((N_trajectory, N_slot, RIS_UNIT, TX_ANT), dtype=np.complex64)    # shape (軌跡數,slot數,N,M)
+    g_dt    = np.empty((N_trajectory, N_slot, TX_ANT, 1), dtype=np.complex64)           # shape (軌跡數,slot數,M,1)
 
-    h_dk_hat_all = h_dk_hat_all.astype(np.complex64)
-    h_rk_hat_all = h_rk_hat_all.astype(np.complex64)
-    G_hat_all    = G_hat_all.astype(np.complex64)
-    g_dt_hat_all = g_dt_hat_all.astype(np.complex64)
+    # --------------------------------
+    # 建立通道的大尺度路徑功率增益 dataset
+    # --------------------------------
+    beta_d_data = np.empty((N_trajectory, N_slot, K), dtype=np.float32)                 # BS  → UE，shape (軌跡數,slot數,K)
+    beta_r_data = np.empty((N_trajectory, N_slot, K), dtype=np.float32)                 # RIS → UE，shape (軌跡數,slot數,K)
+    beta_G_data = np.empty((), dtype=np.float32)                                        # BS  → RIS，純量
+    beta_g_data = np.empty((), dtype=np.float32)                                        # BS  → Target，純量
 
-    dataset = {
-        "pl_BS_UE": pl_BS_UE,               # BS  -> UE  單程PL
-        "pl_RIS_UE": pl_RIS_UE,             # RIS -> UE  單程PL
-        "pl_BS_RIS": pl_BS_RIS,             # BS  -> RIS 單程PL
-        "pl_BS_RIS_UE": pl_BS_RIS_UE,       # BS  -> RIS -> UE 串接PL
-        "pl_BS_TAR": pl_BS_TAR,             # BS  -> TAR 單程PL
-        "pl_BS_TAR_BS": pl_BS_TAR_BS,       # BS  -> TAR -> BS 雙程PL
+    # --------------------------------
+    # 生成h_dk
+    # --------------------------------
+    for n in range(N_trajectory):
 
-        "h_dk_hat": h_dk_hat_all,           # 帶有PL的估測通道
-        "h_rk_hat": h_rk_hat_all,
-        "G_hat": G_hat_all,
-        "g_dt_hat": g_dt_hat_all,
-    }
+        # 每個 slot 根據 UE 與 BS 的位置計算距離
+        """補充:
+            positions[n] 指的是"positions"4維(軌跡數,slot數,K,座標維度數) 僅看第一維 shape(slot數,K,座標維度數)
+            表示第n條軌跡 每個slot的 每個用戶的 每個維度座標
+            np.linalg.norm(np.array, axis=-1)->沿著np.array最後一維算norm 在這裡最後一維是"座標維度數"
+        """
+        d_dk = np.linalg.norm(positions[n] - np.asarray(Q_BS), axis=-1)     # (N_slot,K) 
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    np.savez_compressed(save_path, **dataset)
+        # 大尺度路徑損耗
+        beta_dk = path_loss_power(d_dk, PL_EXP_BS_UE)                       # (N_slot,K)
+        beta_d_data[n] = beta_dk                                            # 新增：存入第 n 條軌跡的 BS → UE 增益
+
+        # 小尺度 Rayleigh fading：Clarke SOS
+        z_dk = clarke_sos_process(N_slot, TX_ANT, K)                        # (N_slot,M,K)
+
+        # 根據 PPT 公式產生完整 BS -> UE channel
+        h_dk[n] = np.sqrt(beta_dk)[:, None, :] * z_dk                       # (N_slot,M,K)
+
+
+    # --------------------------------
+    # 生成h_rk
+    # --------------------------------
+    for n in range(N_trajectory):
+
+        # 每個 slot 根據 UE 與 RIS 的位置計算距離
+        d_rk = np.linalg.norm(positions[n] - np.asarray(Q_RIS), axis=-1)    # (N_slot,K)
+
+        # 大尺度路徑損耗
+        beta_rk = path_loss_power(d_rk, PL_EXP_RIS_UE)                      # (N_slot,K)
+        beta_r_data[n] = beta_rk                                            # 新增：存入第 n 條軌跡的 RIS → UE 增益
+
+        # 小尺度 Rician fading 的 NLoS 部分：Clarke SOS
+        z_rk = clarke_sos_process(N_slot, RIS_UNIT, K)                      # (N_slot,N,K)
+
+        # 建立 LoS steering vector
+        h_rk_los = np.empty((N_slot, RIS_UNIT, K), dtype=np.complex64)      # (N_slot,N,K)
+
+        for t in range(N_slot):
+            for k in range(K):
+
+                # 計算 RIS 指向 UE 的角度 (每個t slot k UE 與 RIS夾角不同)
+                theta_rk = theta_calculater(Q_RIS, positions[n, t, k], "-X")
+
+                # 根據角度生成 steering vector
+                h_rk_los[t, :, k:k+1] = steering_vector(RIS_UNIT, theta_rk)
+
+        # Rician LoS 與 NLoS 加權
+        h_rk_rician = np.sqrt(RICIAN_KAPPA / (RICIAN_KAPPA + 1.0)) * h_rk_los + np.sqrt(1.0 / (RICIAN_KAPPA + 1.0)) * z_rk
+
+        # 根據 PPT 公式產生完整 RIS -> UE channel
+        h_rk[n] = np.sqrt(beta_rk)[:, None, :] * h_rk_rician  # (N_slot,N,K)
+
+
+    # --------------------------------
+    # 生成G
+    # --------------------------------
+    # BS 與 RIS 位置固定，因此距離與 Path Loss 固定
+    d_G = dist(Q_BS, Q_RIS)
+    beta_G = path_loss_power(d_G, PL_EXP_BS_RIS)
+    beta_G_data[()] = beta_G                         # 新增：存入 BS → RIS 增益
+
+    # 計算 BS -> RIS 的 AoD 與 RIS <- BS 的 AoA
+    theta_AoD = theta_calculater(Q_BS, Q_RIS, "+X")
+    theta_AoA = theta_calculater(Q_RIS, Q_BS, "-X")
+
+    # 建立 LoS steering vectors
+    a_M = steering_vector(TX_ANT, theta_AoD)      # (M,1)
+    a_N = steering_vector(RIS_UNIT, theta_AoA)    # (N,1)
+
+    # BS → RIS 的 LoS 分量：a_N(theta_AoA) @ a_M(theta_AoD)^H
+    G_LoS = a_N @ a_M.conj().T                    # (N, M)
+
+    for n in range(N_trajectory):
+
+        # 每條 trajectory 獨立生成一次 NLoS，5000 slots 內固定
+        G_NLoS = cn01((RIS_UNIT, TX_ANT))         # (N,M)
+
+        # Rician LoS 與 NLoS 加權
+        G_rician = np.sqrt(beta_G) * (np.sqrt(RICIAN_KAPPA / (RICIAN_KAPPA + 1.0)) * G_LoS + np.sqrt(1.0 / (RICIAN_KAPPA + 1.0)) * G_NLoS)
+
+        # 同一條 trajectory 的所有 slots 共用相同的 G
+        G[n] = G_rician                          # (N_slot,N,M)
+
+
+    # --------------------------------
+    # 生成 g_dt：BS -> Target
+    # --------------------------------
+    # BS 與 Target 位置固定，因此距離與 Path Loss 固定
+    d_dt    = dist(Q_BS, Q_TAR)
+    beta_dt = path_loss_power(d_dt, PL_EXP_BS_TAR)
+    beta_g_data[()] = beta_dt                        # 新增：存入 BS → Target 增益
+
+    # 計算 BS -> Target 的角度
+    theta_dt = theta_calculater(Q_BS, Q_TAR, "+X")
+
+    # 建立 LoS steering vector
+    a_M = steering_vector(TX_ANT, theta_dt)       # (M,1)
+
+    # 根據 PPT 公式生成 BS -> Target channel
+    g_dt_static = np.sqrt(beta_dt) * a_M          # (M,1)
+
+    # 所有 trajectories 與 slots 共用相同的 g_dt
+    g_dt[:] = g_dt_static                         # (N_trajectory,N_slot,M,1)
+
+    # --------------------------------
+    # 儲存 dataset
+    # --------------------------------
+    np.savez(
+        save_path,
+        h_dk=h_dk,
+        h_rk=h_rk,
+        G=G,
+        g_dt=g_dt,
+        beta_d=beta_d_data,
+        beta_r=beta_r_data,
+        beta_G=beta_G_data,
+        beta_g=beta_g_data,
+    )
 
     print(f"[{dataset_name}] dataset 已儲存到：{save_path}")
 
 
+# ================================
+# generate train / val / test datasets
+# ================================
 if __name__ == "__main__":
-    print("[INFO] 依 settings.py 的 固定layouts 生成 datasets ...")
-
+    np.random.seed(RANDOM_SEED)
     build_and_save_dataset(
-        channels=N_TRAIN_CHANNELS,
-        save_path=os.path.join(DATA_DIR, "dataset_train.npz"),
-        dataset_name="train"
+        layout_path     = TRAIN_LAYOUT_PATH,
+        save_path       = TRAIN_DATA_PATH,
+        dataset_name    = "train"
     )
 
     build_and_save_dataset(
-        channels=N_VAL_CHANNELS,
-        save_path=os.path.join(DATA_DIR, "dataset_val.npz"),
-        dataset_name="val"
+        layout_path     = VAL_LAYOUT_PATH,
+        save_path       = VAL_DATA_PATH,
+        dataset_name    = "val"
     )
 
     build_and_save_dataset(
-        channels=N_TEST_CHANNELS,
-        save_path=os.path.join(DATA_DIR, "dataset_test.npz"),
-        dataset_name="test"
+        layout_path     = TEST_LAYOUT_PATH,
+        save_path       = TEST_DATA_PATH,
+        dataset_name    = "test"
     )
 
-
-    if Debug:
-        with np.load(os.path.join(DATA_DIR, "dataset_train.npz")) as data:
-            print_dataset_debug(data)
-
-    print("[INFO] 全部 datasets 生成完成。")
+    print("\n[INFO] All channels generated successfully.")

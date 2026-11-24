@@ -1,13 +1,15 @@
-# === Uncertainty Injection (ISAC/MIMO) 專案 .gitignore ===
+# ============================================================
+# RIS-Assisted ISAC with Uncertainty Injection
+# ============================================================
 
-# ---- Python 基本快取 ----
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *$py.class
 
-# ---- 虛擬環境（不要被 Git 追蹤）----
+# Virtual environments
 ml311/
 .venv/
 venv/
@@ -15,20 +17,18 @@ env/
 ENV/
 python_env/
 
-# ---- Build/Packaging ----
+# Build and packaging
 build/
 dist/
 *.egg-info/
 
-# ---- 資料/檢核點/模型（可再生或檔案大）----
+# Generated datasets and checkpoints
+shared_data/
 Data/
 Data_MIMO/
 checkpoints/
-Trained_Models_ISAC/
-Trained_Models_MIMO/
-eval_plots/
 
-# 常見大型檔案副檔名（模型/權重/中間檔）
+# Generated datasets and model weights
 *.npy
 *.npz
 *.mat
@@ -39,24 +39,31 @@ eval_plots/
 *.pkl
 *.bin
 
-# ---- 日誌 ----
+# Logs and temporary files
 *.log
+*.tmp
+.cache/
+.pytest_cache/
+.mypy_cache/
 
-# ---- Jupyter ----
+# Jupyter Notebook
 .ipynb_checkpoints/
 
-# ---- IDE/編輯器 ----
+# IDE and editor settings
 .vscode/
 .idea/
 
-# ---- 作業系統雜項 ----
+# Operating system files
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ---- 其他快取/暫存 ----
-.cache/
-*.tmp
-
-# ---- 評估結果：忽略所有 One_timescale 數據----
+# Legacy output directories
+Trained_Models_ISAC/
+Trained_Models_MIMO/
 One_timescale/
+eval_plots/
+
+# Experiment results
+# PNG, PDF and CSV results are tracked by default.
+# Two_timescale/ is intentionally not ignored.
