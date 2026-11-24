@@ -13,27 +13,7 @@ from two_timescale_NN import JointNet, RISNet, compute_effective_channel, comput
 # ================================
 # Helpers
 # ================================
-def moving_average(x, window):
-    """
-    Valid moving average.
-    回傳:
-        ma_epochs : 對應 moving average 的 epoch index
-        y_ma      : moving average 後的曲線
-    """
-    x = np.asarray(x, dtype=np.float64).reshape(-1)
-    window = int(window)
-
-    if len(x) < window:
-        return np.array([], dtype=np.int32), np.array([], dtype=np.float64)
-
-    kernel = np.ones(window, dtype=np.float64) / window
-    y_ma = np.convolve(x, kernel, mode="valid")
-    ma_epochs = np.arange(window, len(x) + 1)
-
-    return ma_epochs, y_ma
-
-
-def plot_joint_reg_curves(reg_curve_path, reg_curve_dir, ma_window=20):
+def plot_joint_reg_curves(reg_curve_path, reg_curve_dir):
     """
     畫四類圖：
     1. Train / Validation Loss
@@ -62,17 +42,8 @@ def plot_joint_reg_curves(reg_curve_path, reg_curve_dir, ma_window=20):
     # ================================
     plt.figure(figsize=(10, 6))
 
-    plt.plot(epochs,train_loss,label="Train Loss",alpha=0.35,linewidth=1.0)
-    plt.plot(epochs,val_loss,label="Validation Loss",alpha=0.35,linewidth=1.0)
-
-    train_ma_epochs, train_loss_ma  = moving_average(train_loss,ma_window)
-    val_ma_epochs, val_loss_ma      = moving_average(val_loss,ma_window)
-
-    if len(train_loss_ma) > 0:
-        plt.plot(train_ma_epochs,train_loss_ma,label=f"Train Loss MA({ma_window})",linewidth=2.5)
-
-    if len(val_loss_ma) > 0:
-        plt.plot(val_ma_epochs,val_loss_ma,label=f"Validation Loss MA({ma_window})",linewidth=2.5)
+    plt.plot(epochs,train_loss,label="Train Loss",linewidth=1.0)
+    plt.plot(epochs,val_loss,label="Validation Loss",linewidth=1.0)
 
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
@@ -92,17 +63,8 @@ def plot_joint_reg_curves(reg_curve_path, reg_curve_dir, ma_window=20):
     # ================================
     plt.figure(figsize=(10, 6))
 
-    plt.plot(epochs,train_nominal,label="Train Nominal Worst-UE Rate",alpha=0.35,linewidth=1.0)
-    plt.plot(epochs,val_nominal,label="Validation Nominal Worst-UE Rate",alpha=0.35,linewidth=1.0)
-
-    train_ma_epochs, train_nominal_ma = moving_average(train_nominal,ma_window)
-    val_ma_epochs, val_nominal_ma = moving_average(val_nominal,ma_window)
-
-    if len(train_nominal_ma) > 0:
-        plt.plot(train_ma_epochs,train_nominal_ma,label=f"Train Nominal MA({ma_window})",linewidth=2.5)
-
-    if len(val_nominal_ma) > 0:
-        plt.plot(val_ma_epochs,val_nominal_ma,label=f"Validation Nominal MA({ma_window})",linewidth=2.5)
+    plt.plot(epochs,train_nominal,label="Train Nominal Worst-UE Rate",linewidth=1.0)
+    plt.plot(epochs,val_nominal,label="Validation Nominal Worst-UE Rate",linewidth=1.0)
 
     plt.xlabel("Epoch")
     plt.ylabel("Nominal Worst-UE Rate (bps/Hz)")
@@ -122,8 +84,8 @@ def plot_joint_reg_curves(reg_curve_path, reg_curve_dir, ma_window=20):
     # ================================
     plt.figure(figsize=(10, 6))
 
-    plt.plot(epochs,train_target_snr_db,label="Train Target SNR",alpha=0.5,linewidth=1.5)
-    plt.plot(epochs,val_target_snr_db,label="Validation Target SNR",alpha=0.5,linewidth=1.5)
+    plt.plot(epochs,train_target_snr_db,label="Train Target SNR",linewidth=1.5)
+    plt.plot(epochs,val_target_snr_db,label="Validation Target SNR",linewidth=1.5)
     plt.axhline(y=SENSING_SNR_THRESHOLD_DB,linestyle="--",label="Sensing Threshold")
 
     plt.xlabel("Epoch")

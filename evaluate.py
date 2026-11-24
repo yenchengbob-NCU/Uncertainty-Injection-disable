@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-import os
 import numpy as np
 import torch
 
 from settings import *
 from two_timescale_NN import RISNet, JointNet, compute_effective_channel, compute_isac_batch_performance
 from joint_rob import inject_channel
+from AO import AO_SAVE_PATH
 
 # ================================
 # 評估參數
@@ -24,7 +24,11 @@ def select_test_blocks(trajectories,slots):
 
 
 def robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,phi,W):
-    # 四條通道的前兩軸都是 (S,Q)。
+    """
+    每次只評估一種方法的一個 LT block，輸入包含該 block 的 Q 個時槽。
+    各槽用 S 組擾動樣本計算指標，再將 Q 個時槽的指標加總後回傳。
+    """
+    # 四條通道的前兩軸都是 (S,Q)
     # S 是注入樣本數；Q 是這個 LT block 的時槽數。
     # 共用效能函數接受單一 batch 軸，因此先將 (S,Q) 展平成 (S*Q,)。
     h_dk_flat = h_dk_inj.flatten(0,1)                    # (S*Q,M,K)
@@ -34,27 +38,27 @@ def robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,phi,W):
 
     # 此方法在這個 block 只有一組 phi，所有樣本及時槽共用。
     # W 保留逐槽差異：同一個 slot 的 S 組注入樣本都使用該槽的 nominal W。
-    phi_flat = phi.reshape(1,RIS_UNIT).expand(h_dk_flat.shape[0],RIS_UNIT)
-    W_flat = W.unsqueeze(0).expand(INJECTION_SAMPLES,-1,-1,-1).flatten(0,1)
+    phi_flat = phi.unsqueeze(0).expand(INJECTION_SAMPLES, -1, -1).flatten(0, 1) # (S*Q,N)
+    W_flat   = W.unsqueeze(0).expand(INJECTION_SAMPLES,-1,-1,-1).flatten(0,1)   # (S*Q,M,K)
 
     H_eff_H_flat = compute_effective_channel(h_dk_flat,h_rk_flat,G_flat,phi_flat)
-    metrics = compute_isac_batch_performance(H_eff_H_flat,g_dt_flat,W_flat)
+    metrics      = compute_isac_batch_performance(H_eff_H_flat,g_dt_flat,W_flat)
 
     # 還原注入樣本軸與時槽軸，才能對每個 slot 分別計算分位數。
-    rate        = metrics["rate"].reshape(INJECTION_SAMPLES,LT_BLOCK_SIZE,UAV_COMM)
-    target_snr = metrics["target_snr"].reshape(INJECTION_SAMPLES,LT_BLOCK_SIZE)
-    target_snr_db = metrics["target_snr_db"].reshape(INJECTION_SAMPLES,LT_BLOCK_SIZE)
+    rate            = metrics["rate"].reshape(INJECTION_SAMPLES,LT_BLOCK_SIZE,UAV_COMM) # (S,Q,K)
+    target_snr      = metrics["target_snr"].reshape(INJECTION_SAMPLES,LT_BLOCK_SIZE)    # (S,Q)
+    target_snr_db   = metrics["target_snr_db"].reshape(INJECTION_SAMPLES,LT_BLOCK_SIZE) # (S,Q)
 
     # 通訊：每個 (s,t) 先取最差 UE，再對同一個 slot 的 S 筆結果取分位數。
     worst_ue_rate = rate.min(dim=2).values                                    # (S,Q)
     rate_q = torch.quantile(worst_ue_rate,OUTAGE_QUANTILE,dim=0)              # (Q,)
 
     # 感測：每個 slot 先在線性 SNR 上做分位數插值，再轉成 dB。
-    snr_q = torch.quantile(target_snr,TAR_OUTAGE_QUANTILE,dim=0,interpolation="linear")
+    snr_q    = torch.quantile(target_snr,TAR_OUTAGE_QUANTILE,dim=0,interpolation="linear")
     snr_q_db = 10.0*torch.log10(snr_q.clamp_min(1e-12))                       # (Q,)
 
     # 每個 slot 另外保留兩個指標：S 組樣本的平均線性 SNR，以及低於門檻的比例。
-    snr_mean = target_snr.mean(dim=0)                                        # (Q,)
+    snr_mean  = target_snr.mean(dim=0)                                        # (Q,)
     violation = (target_snr_db < SENSING_SNR_THRESHOLD_DB).float().mean(dim=0)
 
     # 回傳本 block 的逐槽加總。最後統一除以接受的總槽數。
@@ -71,6 +75,9 @@ def robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,phi,W):
 # ================================
 if __name__ == "__main__":
 
+    np.random.seed(RANDOM_SEED)
+    torch.manual_seed(RANDOM_SEED)
+
     # Load test dataset
     dataset_keys = ("h_dk","h_rk","G","g_dt","beta_d","beta_r","beta_G","beta_g")
     with np.load(TEST_DATA_PATH) as data:
@@ -80,7 +87,7 @@ if __name__ == "__main__":
     trajectories,slots,M,K = dataset["h_dk"].shape 
 
     # 載入reg模型
-    reg_ris_net = RISNet().to(DEVICE)
+    reg_ris_net   = RISNet().to(DEVICE)
     reg_joint_net = JointNet().to(DEVICE)
 
     reg_ris_net.load_model(REG_THETA_CKPT,strict=True,verbose=True)
@@ -90,7 +97,7 @@ if __name__ == "__main__":
     reg_joint_net.eval()
 
     # 載入rob模型
-    rob_ris_net = RISNet().to(DEVICE)
+    rob_ris_net   = RISNet().to(DEVICE)
     rob_joint_net = JointNet().to(DEVICE)
 
     rob_ris_net.load_model(ROB_THETA_CKPT,strict=True,verbose=True)
@@ -105,12 +112,11 @@ if __name__ == "__main__":
     print(f"[INFO] Selected LT blocks = {len(blocks)}")
 
     # ================================
-    # Load AO5 results
+    # Load AO6 results
     # ================================
     if RUN_AO:
-        from AO import AO_SAVE_PATH
 
-        # 沿用 AO5.py 的輸出路徑。整份結果只讀一次，各 block 依原始 dataset 座標取用。
+        # 沿用 AO.py 的輸出路徑。整份結果只讀一次，各 block 依原始 dataset 座標取用。
         with np.load(AO_SAVE_PATH,allow_pickle=False) as data:
             ao_trajectory_id = data["trajectory_id"]    # (saved_blocks,)
             ao_start_slot    = data["start_slot"]       # (saved_blocks,)
@@ -118,30 +124,22 @@ if __name__ == "__main__":
             ao_W_saved       = data["AO_W"]             # (saved_blocks,Q,M,K)
             ao_success_saved = data["success"]          # (saved_blocks,Q)，每槽是否有可用解
 
-        # AO5 只保存首槽成功的 block，所以用 (trajectory_id,start_slot) 找到對應的結果列。
+         # 以 (trajectory_id, start_slot) 建立 AO 結果資料庫
         ao_block_index = {}
         for ao_row in range(len(ao_trajectory_id)):
             ao_block_index[(int(ao_trajectory_id[ao_row]),int(ao_start_slot[ao_row]))] = ao_row
 
-        print(f"[INFO] Loaded AO5 blocks = {len(ao_block_index)}, path = {AO_SAVE_PATH}")
+        print(f"[INFO] Loaded AO6 blocks = {len(ao_block_index)}, path = {AO_SAVE_PATH}")
 
     # ================================
     # Evaluation setup
     # ================================
-    # inject_channel() 使用 PyTorch 的預設亂數產生器。
-    # seed 在區間迴圈外設定一次，各 block 會依序抽到不同的誤差。
-    torch.manual_seed(RANDOM_SEED)
-    np.random.seed(RANDOM_SEED)
 
-    # 每個方法各自累加 nominal / robust 指標。
-    # nominal 的 rate 是逐槽最差 UE rate；robust 的 rate 是逐槽最差 UE rate 的分位數。
+    # 每個方法各自累加 nominal / robust 指標
+    # nominal 的 rate 是逐槽最差 UE rate；robust 的 rate 是逐槽最差 UE rate 的分位數
     nominal_total = {name: {"rate": 0.0, "snr": 0.0, "violation": 0.0} for name in METHODS}
-    robust_total = {name: {"rate": 0.0, "snr": 0.0, "snr_q_db": 0.0, "violation": 0.0} for name in METHODS}
+    robust_total  = {name: {"rate": 0.0, "snr": 0.0, "snr_q_db": 0.0, "violation": 0.0} for name in METHODS}
     accepted_blocks = 0
-
-    # 固定鏈路在整份 test dataset 中各有一個純量 beta。
-    beta_G = torch.as_tensor(dataset["beta_G"],dtype=torch.float32,device=DEVICE)
-    beta_g = torch.as_tensor(dataset["beta_g"],dtype=torch.float32,device=DEVICE)
 
     for trajectory_id,start_slot in blocks:
 
@@ -164,6 +162,8 @@ if __name__ == "__main__":
         # (Q,K) -> (1,Q,1,K)，沿注入樣本軸與天線軸廣播。
         beta_d = torch.as_tensor(dataset["beta_d"][trajectory_id,slot_ids],dtype=torch.float32,device=DEVICE).reshape(1,LT_BLOCK_SIZE,1,UAV_COMM)
         beta_r = torch.as_tensor(dataset["beta_r"][trajectory_id,slot_ids],dtype=torch.float32,device=DEVICE).reshape(1,LT_BLOCK_SIZE,1,UAV_COMM)
+        beta_G = torch.as_tensor(dataset["beta_G"], dtype=torch.float32, device=DEVICE)
+        beta_g = torch.as_tensor(dataset["beta_g"], dtype=torch.float32, device=DEVICE)
 
         h_dk_rep = h_dk.unsqueeze(0).expand(INJECTION_SAMPLES,-1,-1,-1)       # (S,Q,M,K)
         h_rk_rep = h_rk.unsqueeze(0).expand(INJECTION_SAMPLES,-1,-1,-1)       # (S,Q,N,K)
@@ -176,7 +176,7 @@ if __name__ == "__main__":
         G_inj    = inject_channel(G_rep,beta_G)
         g_dt_inj = inject_channel(g_dt_rep,beta_g)
 
-        # 開啟 AO 比較時，三種方法只在 AO4 有完整 Q 槽決策的 block 上計分。
+        # 開啟 AO 比較時，三種方法只在 AO6 有完整 Q 槽決策的 block 上計分。
         # 此處放在共同注入之後，即使略過本 block，後續 block 的注入亂數順序仍一致。
         if RUN_AO:
             ao_row = ao_block_index.get((trajectory_id,start_slot))
@@ -194,58 +194,54 @@ if __name__ == "__main__":
 
         # 暫存本 block 各方法的 nominal 與 robust 指標。
         nominal_block = {}
-        robust_block = {}
+        robust_block  = {}
 
         # ================================
         # REG test
         # ================================
-        with torch.inference_mode():
+        with torch.inference_mode(): # 這段只做前向運算，不需要計算梯度(python語法)
             # REG nominal：用首槽 CSI 產生一組 REG_phi，固定套用至整個 block。
             # 每一槽再用自己的 nominal 有效通道及目標通道產生 REG_W。
-            REG_phi = reg_ris_net(h_dk[0:1],h_rk[0:1],G[0:1])                  # (1,N)
-            REG_phi_block = REG_phi.expand(LT_BLOCK_SIZE,RIS_UNIT)                # (Q,N)
-            REG_H_eff_H = compute_effective_channel(h_dk,h_rk,G,REG_phi_block)   # (Q,K,M)
-            REG_W = reg_joint_net(REG_H_eff_H,g_dt)                              # (Q,M,K)
+            REG_phi       = reg_ris_net(h_dk[0:1],h_rk[0:1],G[0:1])                 # (1,N)
+            REG_phi_block = REG_phi.expand(LT_BLOCK_SIZE,RIS_UNIT)                  # (Q,N)
+            REG_H_eff_H   = compute_effective_channel(h_dk,h_rk,G,REG_phi_block)    # (Q,K,M)
+            REG_W         = reg_joint_net(REG_H_eff_H,g_dt)                         # (Q,M,K)
 
             nominal_block["REG"] = compute_isac_batch_performance(REG_H_eff_H,g_dt,REG_W)
 
             # REG robust：沿用剛才的 REG_phi、REG_W，在共同注入通道上評估。
-            robust_block["REG"] = robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,REG_phi,REG_W)
+            robust_block["REG"]  = robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,REG_phi_block,REG_W)
 
         # ================================
         # ROB test
         # ================================
-        with torch.inference_mode():
-            # ROB nominal：使用 ROB checkpoint 的兩個網路，在相同 nominal CSI 下產生決策。
-            ROB_phi = rob_ris_net(h_dk[0:1],h_rk[0:1],G[0:1])                  # (1,N)
-            ROB_phi_block = ROB_phi.expand(LT_BLOCK_SIZE,RIS_UNIT)                # (Q,N)
-            ROB_H_eff_H = compute_effective_channel(h_dk,h_rk,G,ROB_phi_block)   # (Q,K,M)
-            ROB_W = rob_joint_net(ROB_H_eff_H,g_dt)                              # (Q,M,K)
+        with torch.inference_mode(): # 這段只做前向運算，不需要計算梯度(python語法)
+            # ROB nominal：使用 ROB checkpoint 的兩個網路，在相同 nominal CSI 下產生決策
+            ROB_phi       = rob_ris_net(h_dk[0:1],h_rk[0:1],G[0:1])                 # (1,N)
+            ROB_phi_block = ROB_phi.expand(LT_BLOCK_SIZE,RIS_UNIT)                  # (Q,N)
+            ROB_H_eff_H   = compute_effective_channel(h_dk,h_rk,G,ROB_phi_block)    # (Q,K,M)
+            ROB_W         = rob_joint_net(ROB_H_eff_H,g_dt)                         # (Q,M,K)
 
             nominal_block["ROB"] = compute_isac_batch_performance(ROB_H_eff_H,g_dt,ROB_W)
 
             # ROB robust：使用 ROB 自己的決策，配上和 REG 完全相同的注入通道。
-            robust_block["ROB"] = robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,ROB_phi,ROB_W)
+            robust_block["ROB"] = robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,ROB_phi_block,ROB_W)
 
         # ================================
         # AO test
         # ================================
         if RUN_AO:
-            with torch.inference_mode():
-                # AO4 儲存的 AO_phi 每個 block 為 (Q,N)，Q 個槽共用首槽求得的 phi。
-                # 取第 0 槽得到 (1,N)，傳給 robust_block_result()；展開成 (Q,N) 供 nominal 使用。
-                AO_phi = torch.as_tensor(ao_phi_saved[ao_row,0:1],dtype=torch.complex64,device=DEVICE)
-                AO_phi_block = AO_phi.expand(LT_BLOCK_SIZE,RIS_UNIT)
+            with torch.inference_mode(): # 這段只做前向運算，不需要計算梯度(python語法)
+                # 取得離線解好的AO解
+                AO_phi       = torch.as_tensor(ao_phi_saved[ao_row, 0:1], dtype=torch.complex64, device=DEVICE) # (1,N)
+                AO_phi_block = AO_phi.expand(LT_BLOCK_SIZE, RIS_UNIT)                                           # (Q,N)
+                AO_H_eff_H   = compute_effective_channel(h_dk, h_rk, G, AO_phi_block)                           # (Q,K,M)
+                AO_W         = torch.as_tensor(ao_W_saved[ao_row], dtype=torch.complex64, device=DEVICE)        # (Q,M,K)
 
-                # AO4 的 W 是逐槽求解，因此取出本 block 全部 Q 個槽的 W，形狀為 (Q,M,K)。
-                AO_W = torch.as_tensor(ao_W_saved[ao_row],dtype=torch.complex64,device=DEVICE)
-
-                # AO nominal：使用當槽的 nominal 通道與離線求得的 AO 決策。
-                AO_H_eff_H = compute_effective_channel(h_dk,h_rk,G,AO_phi_block)
-                nominal_block["AO"] = compute_isac_batch_performance(AO_H_eff_H,g_dt,AO_W)
+                nominal_block["AO"] = compute_isac_batch_performance(AO_H_eff_H, g_dt, AO_W)
 
                 # AO robust：固定相同的 AO_phi、AO_W，使用和 REG、ROB 完全相同的注入通道。
-                robust_block["AO"] = robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,AO_phi,AO_W)
+                robust_block["AO"] = robust_block_result(h_dk_inj,h_rk_inj,G_inj,g_dt_inj,AO_phi_block,AO_W)
 
         # ================================
         # 接受本 block，累加各方法結果
