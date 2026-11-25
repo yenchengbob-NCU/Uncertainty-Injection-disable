@@ -67,3 +67,7 @@ eval_plots/
 # Experiment results
 # PNG, PDF and CSV results are tracked by default.
 # Two_timescale/ is intentionally not ignored.
+
+# 本機實驗產物與備份
+/Two_timescale/
+/Two_timescale_OLD/

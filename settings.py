@@ -23,14 +23,30 @@ else:
     print("[INFO] 一定要使用cuda")
 
 # ================================
-# 專案元件座標
+# 場景參數 物理與功率參數
+# ================================
+TX_ANT   = 4                        # BS  發射天線數 M
+RIS_UNIT = 64                       # RIS 反射單元數 N
+UAV_COMM = 2                        # 通訊 UE 數 K
+
+NOISE_POWER             = 1e-11     # 雜訊功率(W) 10^-11 -80dBm
+TRANSMIT_POWER_TOTAL    = 1.26      # 傳輸功率(W)
+RCS_POWER               = 1.0       # 目標複數散射係數的平均功率 E[|alpha_RCS|^2]
+
+# ================================
+# 專案元件座標與大尺度衰變係數
 # ================================
 Q_BS      = (0.0 , 0.0)     # 基站座標
 Q_RIS     = (50.0, 0.0)     # RIS座標
 Q_TAR     = (5.0, 8.66)     # 感測物座標 60度
 
+PL_EXP_BS_RIS   = 2.3               # 單程PL係數 BS  -> RIS
+PL_EXP_RIS_UE   = 2.2               # 單程PL係數 RIS -> UE
+PL_EXP_BS_UE    = 3.3               # 單程PL係數 BS  -> UE
+PL_EXP_BS_TAR   = 2.7               # 單程PL係數 BS  -> TAR
+
 # ================================
-# UE 軌跡生成
+# UE 移動與時槽
 # ================================
 MOBILITY_ALPHA  = 1.0        # alpha=1: 每條 trajectory 內速度與方向固定 (Gauss_Markov)
 V_MEAN          = 1.0        # 長期平均速度1(m/s)
@@ -56,25 +72,6 @@ UE_DIRECTION_RANGE_DEG = (120.0, 240.0)         # 每條 trajectory 的平均移
 CARRIER_FREQUENCY = 8e9             # 中心頻率
 SPEED_OF_LIGHT    = 3e8             # 光速
 MAX_DOPPLER       = CARRIER_FREQUENCY * V_MEAN / SPEED_OF_LIGHT
-
-# ================================
-# 場景參數
-# ================================
-TX_ANT   = 4                        # BS  發射天線數 M
-RIS_UNIT = 64                       # RIS 反射單元數 N
-UAV_COMM = 2                        # 通訊 UE 數 K
-
-PL_EXP_BS_RIS   = 2.3               # 單程PL係數 BS  -> RIS
-PL_EXP_RIS_UE   = 2.2               # 單程PL係數 RIS -> UE
-PL_EXP_BS_UE    = 3.3               # 單程PL係數 BS  -> UE
-PL_EXP_BS_TAR   = 2.7               # 單程PL係數 BS  -> TAR
-
-# ================================
-# 物理與功率參數
-# ================================
-NOISE_POWER             = 1e-11     # 雜訊功率(W) 10^-11 -80dBm
-TRANSMIT_POWER_TOTAL    = 1.26      # 傳輸功率(W)
-RCS_POWER               = 1.0       # 目標複數散射係數的平均功率 E[|alpha_RCS|^2]
 
 # ================================
 # 感測門檻
@@ -116,31 +113,48 @@ LEARNING_RATE  = 0.0001
 EARLY_STOP_EPS = 1e-6               # REG / ROB 判定 validation loss 改善的最小差值
 
 # ================================
+# 神經網路參數
+# ================================
+LAYER          = 3                  # 隱藏層數，不含輸入層與輸出層
+NET            = 1024               # RISNet 和 JointNet 共用的基準隱藏層寬度
+
+# ================================
 # 資料夾結構
 # ================================
-SCENARIO_TAG    = f"M{TX_ANT}_N{RIS_UNIT}_K{UAV_COMM}"
-BASE_RUN_DIR    = os.path.join("Two_timescale",SCENARIO_TAG)
+SCENARIO_TAG = f"M{TX_ANT}_N{RIS_UNIT}_K{UAV_COMM}"         # 天線 反射元件 用戶 數量
+BASE_RUN_DIR = os.path.join("Two_timescale", SCENARIO_TAG)
+
+MOBILITY_TAG = f"V{V_MEAN:g}_alpha{MOBILITY_ALPHA:g}"       # UE移動速度與alpha更新
+MOBILITY_RUN_DIR = os.path.join(BASE_RUN_DIR, MOBILITY_TAG)
+
+# 相同場景和移動條件下，各種 NN 架構共用同一份資料
+DATA_DIR = os.path.join(MOBILITY_RUN_DIR, "shared_data")
+
+NN_TAG = f"L{LAYER:02d}_NET{NET}"
+Q_SENSING_TAG = f"Q{LT_BLOCK_SIZE}_sense_{SENSING_SNR_THRESHOLD_DB:g}dB" # Q 與 感測門檻
+NN_RUN_DIR = os.path.join(MOBILITY_RUN_DIR, "nn", NN_TAG, Q_SENSING_TAG)
 
 REG_PENALTY_TAG = f"reg_{REG_SENSING_LOSS_WEIGHT:g}"
 ROB_PENALTY_TAG = f"rob_{ROB_SENSING_LOSS_WEIGHT:g}"
 
-DATA_DIR        = os.path.join(BASE_RUN_DIR, "shared_data")         # shared dataset
-PRETRAIN_DIR    = os.path.join(BASE_RUN_DIR, "pretrain")            
+INJECTION_VARIANCE_TAG = str(INJECTION_VARIANCE).replace(".", "p")
+ROB_INJECTION_TAG = f"injvar_{INJECTION_VARIANCE_TAG}_injS{INJECTION_SAMPLES}" # 注入大小與數量
 
-REG_CKPT_DIR    = os.path.join(BASE_RUN_DIR, "regular",REG_PENALTY_TAG)
-ROB_CKPT_DIR    = os.path.join(BASE_RUN_DIR, "robust" ,ROB_PENALTY_TAG)
+REG_CKPT_DIR = os.path.join(NN_RUN_DIR, "regular", REG_PENALTY_TAG)
+ROB_CKPT_DIR = os.path.join(NN_RUN_DIR, "robust", ROB_PENALTY_TAG, ROB_INJECTION_TAG)
 
-RESULT_DIR      = os.path.join(BASE_RUN_DIR, "results")
+# 沿用既有的 pretrain 與 AO 結果位置
+RESULT_DIR = os.path.join(BASE_RUN_DIR, "results")
 
 # ================================
 # 跨程式共用檔案路徑
 # ================================
-# trajectory_gen 產生，channel_gen_new 讀取
+# trajectory_gen.py 產生，channel_gen.py 讀取
 TRAIN_LAYOUT_PATH = os.path.join(DATA_DIR, "layout_train.npz")
 VAL_LAYOUT_PATH   = os.path.join(DATA_DIR, "layout_val.npz")
 TEST_LAYOUT_PATH  = os.path.join(DATA_DIR, "layout_test.npz")
 
-# channel_gen_new 產生，joint_reg / joint_rob / evaluate_new 讀取
+# channel_gen.py 產生，訓練與評估程式讀取
 TRAIN_DATA_PATH = os.path.join(DATA_DIR, "dataset_train.npz")
 VAL_DATA_PATH   = os.path.join(DATA_DIR, "dataset_val.npz")
 TEST_DATA_PATH  = os.path.join(DATA_DIR, "dataset_test.npz")
@@ -156,7 +170,6 @@ ROB_JOINT_CKPT = os.path.join(ROB_CKPT_DIR, "joint_beamformer_rob.ckpt")
 # ================================
 os.makedirs(BASE_RUN_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(PRETRAIN_DIR, exist_ok=True)
 os.makedirs(REG_CKPT_DIR, exist_ok=True)
 os.makedirs(ROB_CKPT_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)

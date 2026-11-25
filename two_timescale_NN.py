@@ -7,12 +7,6 @@ import torch.nn.functional as F
 from settings import *
 
 # ================================
-# helpers
-# ================================
-NET            = 1024                # RISNet / JointNet 預設 hidden dimension 三層寬度依序為 d、2d、d
-
-
-# ================================
 # 共用計算函式
 # 注意以下函式需要吃batch
 # ================================
@@ -158,9 +152,7 @@ class ISACNetBase(nn.Module):
 
     def load_model(self, path, strict=True, verbose=True):
         if not os.path.exists(path):
-            if verbose:
-                print(f"[load_model] 找不到 checkpoint:{path}")
-            return
+            raise FileNotFoundError(f"[load_model] 找不到 checkpoint: {os.path.abspath(path)}")
 
         state = torch.load(path, map_location=self.model_device)
         self.load_state_dict(state, strict=strict)
@@ -192,7 +184,7 @@ class JointNet(ISACNetBase):
         ||W||_F^2 = TRANSMIT_POWER_TOTAL
     """
 
-    def __init__(self, hidden_dim: int = NET):
+    def __init__(self, hidden_dim: int = NET, num_hidden_layers: int = LAYER):
         super().__init__()
         # H_eff_H: K*M complex
         # g_dt   : M complex
@@ -205,6 +197,10 @@ class JointNet(ISACNetBase):
         
         self.fc1 = nn.Linear(self.in_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
+
+        # 額外增加的隱藏層 2d → 2d，各有自己的權重
+        self.extra_hidden_layers = nn.ModuleList(nn.Linear(2 * hidden_dim, 2 * hidden_dim)for _ in range(num_hidden_layers - 3))
+
         self.fc3 = nn.Linear(2 * hidden_dim, hidden_dim)
 
         self.fc_out_real = nn.Linear(hidden_dim, self.out_complex_dim)
@@ -233,6 +229,11 @@ class JointNet(ISACNetBase):
 
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+
+        # 額外增加的隱藏層
+        for layer in self.extra_hidden_layers:
+            x = F.relu(layer(x))
+            
         x = F.relu(self.fc3(x))
 
         y_real = self.fc_out_real(x)
@@ -349,7 +350,7 @@ class RISNet(ISACNetBase):
         -> phi,         shape = (B, RIS_UNIT), complex
     """
 
-    def __init__(self, hidden_dim: int = NET):
+    def __init__(self, hidden_dim: int = NET, num_hidden_layers: int = LAYER):
         super().__init__()
 
         self.in_dim = 2 * (
@@ -363,6 +364,10 @@ class RISNet(ISACNetBase):
 
         self.fc1 = nn.Linear(self.in_dim, hidden_dim)
         self.fc2 = nn.Linear(hidden_dim, 2 * hidden_dim)
+
+        # 額外增加的隱藏層 2d → 2d，各有自己的權重
+        self.extra_hidden_layers = nn.ModuleList(nn.Linear(2 * hidden_dim, 2 * hidden_dim)for _ in range(num_hidden_layers - 3))
+
         self.fc3 = nn.Linear(2 * hidden_dim, hidden_dim)
         self.fc_out = nn.Linear(hidden_dim, self.out_dim)
 
@@ -374,6 +379,11 @@ class RISNet(ISACNetBase):
     def forward_mlp(self, x):
         x = F.relu(self.fc1(x))
         x = F.relu(self.fc2(x))
+
+        # 額外增加的隱藏層
+        for layer in self.extra_hidden_layers:
+            x = F.relu(layer(x))
+
         x = torch.tanh(self.fc3(x))
         x = self.fc_out(x)
 
